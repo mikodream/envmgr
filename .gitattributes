@@ -1,0 +1,15 @@
+# Normalize line endings in the repository, so a checkout on any platform holds
+# the same bytes. Go source and shell scripts stay LF; PNG screenshots are binary.
+* text=auto
+
+*.go text eol=lf
+*.sh text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary

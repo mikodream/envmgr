@@ -1,0 +1,17 @@
+# Build output. The cross-compiled release binaries live here and are produced
+# by the build loop in the README, so they are not committed.
+/dist/
+/envmgr
+/envmgr.exe
+
+# Offline snapshots produced by cmd/snap. These ARE committed: the README embeds
+# them, so the screenshots have to travel with the source.
+# /shots/
+
+# Local reference material: the mygo source copy
+/_probe/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.log
