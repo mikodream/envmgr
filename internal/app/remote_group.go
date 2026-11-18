@@ -89,23 +89,53 @@ func groupRemote(list []core.Remote) []remoteGroup {
 		})
 		out = append(out, *g)
 	}
+	versions := make(map[string]core.Version, len(out))
+	for _, group := range out {
+		versions[group.Version] = core.ParseVersion(group.Version)
+	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return core.ParseVersion(out[i].Version).Compare(core.ParseVersion(out[j].Version)) > 0
+		return versions[out[i].Version].Compare(versions[out[j].Version]) > 0
 	})
 	return out
 }
 
-// groupsFor returns the grouped rows of one kind, filtered by the LTS switch.
-func (a *App) groupsFor(kind core.Kind) []remoteGroup {
-	groups := groupRemote(a.visibleRemote(kind))
-	if !a.filterLTS {
-		return groups
-	}
-	out := groups[:0]
-	for _, g := range groups {
-		if g.LTS {
-			out = append(out, g)
+// remoteGroupedView is computed once per feed; wheel frames only select one
+// of its ready lists. Feeds are immutable until replaced by a refresh.
+type remoteGroupedView struct {
+	source   []core.Remote
+	all, lts []remoteGroup
+}
+
+func buildRemoteGroupedView(kind core.Kind, source []core.Remote) remoteGroupedView {
+	var all, lts []core.Remote
+	for _, remote := range source {
+		if remote.Kind != kind {
+			continue
+		}
+		all = append(all, remote)
+		if remote.LTS {
+			lts = append(lts, remote)
 		}
 	}
-	return out
+	return remoteGroupedView{source: source, all: groupRemote(all), lts: groupRemote(lts)}
+}
+
+func (v remoteGroupedView) matches(source []core.Remote) bool {
+	return len(v.source) == len(source) && (len(source) == 0 || &v.source[0] == &source[0])
+}
+
+// groupsFor returns cached rows without filtering or sorting the full feed.
+func (a *App) groupsFor(kind core.Kind) []remoteGroup {
+	if a.remoteGroups == nil {
+		a.remoteGroups = make(map[core.Kind]remoteGroupedView)
+	}
+	view, ok := a.remoteGroups[kind]
+	if !ok || !view.matches(a.remote) {
+		view = buildRemoteGroupedView(kind, a.remote)
+		a.remoteGroups[kind] = view
+	}
+	if a.filterLTS {
+		return view.lts
+	}
+	return view.all
 }

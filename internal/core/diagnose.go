@@ -106,6 +106,12 @@ type putFunc func(section int, c Check)
 // it can judge. It changes nothing: the window turns the Fix fields into
 // buttons, so the user stays in control.
 func Diagnose(svc *Service) Report {
+	return DiagnoseWithInstalled(svc, svc.Installed())
+}
+
+// DiagnoseWithInstalled checks the supplied discovery snapshot without starting
+// another SDK scan. Background UI updates share it with their project resolutions.
+func DiagnoseWithInstalled(svc *Service, installed []Installed) Report {
 	rep := Report{Sections: []Section{
 		{Title: "运行环境", Desc: "EnvMgr 自身与它依赖的运行时"},
 		{Title: "数据与存储", Desc: "状态文件、SDK 目录、下载缓存"},
@@ -131,8 +137,8 @@ func Diagnose(svc *Service) Report {
 	checkRuntime(put)
 	checkStorage(svc, put)
 	checkTerminal(put)
-	checkToolchains(svc, put)
-	checkProjects(svc, put)
+	checkToolchains(installed, put)
+	checkProjects(svc, installed, put)
 	checkSettings(svc, put)
 	return rep
 }
@@ -370,8 +376,7 @@ func detectTerminal() (string, bool) {
 	return "", false
 }
 
-func checkToolchains(svc *Service, put putFunc) {
-	installed := svc.Installed()
+func checkToolchains(installed []Installed, put putFunc) {
 	if len(installed) == 0 {
 		put(secToolchains, Check{
 			Title:  "已发现版本",
@@ -416,7 +421,7 @@ func checkToolchains(svc *Service, put putFunc) {
 	}
 }
 
-func checkProjects(svc *Service, put putFunc) {
+func checkProjects(svc *Service, installed []Installed, put putFunc) {
 	if manual := svc.ManualInstalls(); len(manual) > 0 {
 		put(secProjects, Check{
 			Title:  "手动添加的版本",
@@ -434,7 +439,6 @@ func checkProjects(svc *Service, put putFunc) {
 		})
 		return
 	}
-	installed := svc.Installed()
 	follow := svc.Config().FollowMarkers
 	for _, p := range projects {
 		res := Resolve(p, installed, follow)

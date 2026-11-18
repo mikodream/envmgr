@@ -80,7 +80,7 @@ func (a *App) dashboard(c *ui.Context) {
 					})
 					if row.Clicked() {
 						a.page = PageToolchains
-						a.toolchainKind = kindIndexOf(kind)
+						a.SetToolchainKind(kind)
 					}
 				}
 			})
@@ -255,16 +255,15 @@ func (a *App) projectCard(c *ui.Context, p core.Project, index int) {
 		// The commit address, so a tile names the identity a commit would use
 		// without opening the project. A binding's own name is shown when it has
 		// one, because "公司账号" reads faster than a URL.
-		if git, ok := a.svc.PeekGit(p.Path); ok && git.Available && git.Remote != "" {
-			ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
-				ui.Icon(c, icBranch).Size(11, 11).TextColor(t.TextMuted)
-				label, bound := a.gitAddressLabel(git.Remote)
-				colour := t.TextMuted
-				if bound {
-					colour = t.Success
+		if git, ok := a.svc.PeekGit(p.Path); ok && git.Available {
+			ui.Row(c).Gap(5).Wrap().Children(func() {
+				for _, remote := range git.Remotes {
+					label, _ := a.gitAddressLabel(remote.URL)
+					if remote.Name != "origin" {
+						label = remote.Name
+					}
+					a.chip(c, label, t.TextMuted, t.SurfaceHover)
 				}
-				ui.Text(c, label).FontSize(10).TextColor(colour).
-					SingleLine().Ellipsis("…")
 			})
 		}
 
@@ -573,10 +572,15 @@ func (a *App) kindCard(c *ui.Context, p core.Project, kind core.Kind, r core.Res
 					a.pinBuf[idx] = options[i]
 				}
 			}
-			sel := ui.Select(c, &a.pinBuf[idx], options).Label(info.Name + " 版本")
-			if sel.Changed() {
+			pick := selectChoice{Name: a.pinBuf[idx], Value: a.pinBuf[idx]}
+			choices := make([]selectChoice, len(options))
+			for i, option := range options {
+				choices[i] = selectChoice{Name: option, Value: option}
+			}
+			if a.selectControl(c, &pick, choices, info.Name+" 版本", false, false) {
 				for i, opt := range options {
-					if opt == a.pinBuf[idx] {
+					if opt == pick.Name {
+						a.pinBuf[idx] = opt
 						a.setPin(p, kind, values[i])
 						break
 					}
@@ -589,53 +593,85 @@ func (a *App) kindCard(c *ui.Context, p core.Project, kind core.Kind, r core.Res
 // ---- 工具链 ----
 
 func (a *App) toolchainsPage(c *ui.Context) {
+	ui.Column(c).Fill().Padding(20, 20, 24, 20).Gap(14).Children(func() {
+		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			ui.Segmented(c, &a.toolchainView, "已装 SDK", "版本管理器").Label("工具链视图")
+			ui.Spacer(c)
+		})
+		if a.toolchainView == 1 {
+			a.toolchainManagers(c)
+			return
+		}
+		a.toolchainVersions(c)
+	})
+}
+
+func (a *App) toolchainVersions(c *ui.Context) {
+	t := c.Theme()
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		if ui.Segmented(c, &a.toolchainKind, kindNames()...).Label("SDK 类型").Changed() {
+			a.installedList = ui.ListState{}
+		}
+		ui.Spacer(c)
+		if ui.Button(c, "＋ 添加已安装版本").Label("手动添加一个不在常规位置的版本").Clicked() {
+			a.openAddVersion()
+		}
+	})
 	kind := core.Kinds[a.toolchainKind]
 	list := a.sortedInstalled(kind)
-	t := c.Theme()
-
-	ui.Scroll(c).Fill().Padding(20, 20, 24, 20).Gap(14).Children(func() {
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Segmented(c, &a.toolchainKind, kindNames()...).Label("SDK 类型")
-			ui.Spacer(c)
-			if ui.Button(c, "＋ 添加已安装版本").Label("手动添加一个不在常规位置的版本").Clicked() {
-				a.openAddVersion()
-			}
-		})
-
-		card := a.card(c).Gap(0).Padding(6, 6)
-		card.Children(func() {
-			if len(list) == 0 {
-				ui.Column(c).Padding(20).Gap(8).Center().Children(func() {
-					ui.Icon(c, icBox).Size(22, 22).TextColor(t.TextMuted)
-					ui.Text(c, "本机没有 "+core.Info(kind).Name+" 的任何版本").FontSize(12.5).Bold()
-					ui.Text(c, "可以用 nvm / pyenv / fnm 装，也可以在下载页由 EnvMgr 直接安装。").
-						FontSize(11).TextColor(t.TextMuted)
-					ui.Row(c).Gap(8).Children(func() {
-						if ui.PrimaryButton(c, "去下载").Clicked() {
-							a.page = PageDownloads
-							a.downloadKind = kindIndexOf(kind)
-							a.loadRemote(kind, false)
-						}
-						if ui.Button(c, "手动添加").Clicked() {
-							a.openAddVersion()
-						}
-					})
-				})
+	rows := len(list)
+	if rows == 0 {
+		rows = 1
+	}
+	a.installedList.Key = func(i int) any {
+		if len(list) == 0 {
+			return "empty:" + string(kind)
+		}
+		inst := list[i]
+		return "installed:" + string(inst.Kind) + "@" + inst.Version + ":" + inst.Path
+	}
+	a.card(c).Fill().Gap(0).Padding(6).Children(func() {
+		ui.List(c, &a.installedList, rows, func(i int) {
+			if len(list) > 0 {
+				a.installedRow(c, list[i])
 				return
 			}
-			for _, inst := range list {
-				a.installedRow(c, inst)
-			}
-		})
+			ui.Column(c).Padding(20).Gap(8).Center().Children(func() {
+				ui.Icon(c, icBox).Size(22, 22).TextColor(t.TextMuted)
+				ui.Text(c, "本机没有 "+core.Info(kind).Name+" 的任何版本").FontSize(12.5).Bold()
+				ui.Text(c, "可直接下载 SDK，或到「版本管理器」安装管理工具。").FontSize(11).TextColor(t.TextMuted)
+				ui.Row(c).Gap(8).Children(func() {
+					if ui.PrimaryButton(c, "去下载").Clicked() {
+						a.page = PageDownloads
+						a.downloadKind = kindIndexOf(kind)
+						a.loadRemote(kind, false)
+					}
+					if ui.Button(c, "手动添加").Clicked() {
+						a.openAddVersion()
+					}
+					if ui.Button(c, "查看版本管理器").Clicked() {
+						a.OpenManagers()
+					}
+				})
+			})
+		}).Grow(1)
+	})
+}
 
-		// Managers present on this machine.
-		a.sectionLabel(c, "版本管理器")
-		mgrCard := a.card(c).Gap(0).Padding(6, 6)
-		mgrCard.Children(func() {
-			for _, m := range a.managers {
-				a.managerRow(c, m)
-			}
-		})
+func (a *App) toolchainManagers(c *ui.Context) {
+	t := c.Theme()
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "版本管理器").FontSize(13).Bold()
+		a.chip(c, fmt.Sprintf("%d 个", len(a.managers)), t.TextMuted, t.SurfaceHover)
+	})
+	ui.Text(c, "集中管理 nvm、fnm、pyenv、mise 等工具；支持多种语言的管理器统一显示一次。").FontSize(11).TextColor(t.TextMuted).Wrap()
+	a.managerList.Key = func(i int) any { return "manager:" + a.managers[i].ID }
+	a.card(c).Fill().Gap(0).Padding(6).Children(func() {
+		if len(a.managers) == 0 {
+			ui.Text(c, "暂时没有版本管理器信息，可点击上方「重新扫描」更新。").FontSize(11).TextColor(t.TextMuted)
+			return
+		}
+		ui.List(c, &a.managerList, len(a.managers), func(i int) { a.managerRow(c, a.managers[i]) }).Grow(1)
 	})
 }
 
@@ -828,7 +864,7 @@ func (a *App) remoteRow(c *ui.Context, g remoteGroup) {
 				return
 			}
 		}
-		if inst, ok := core.Exact(a.installed, g.Kind, g.Version); ok {
+		if inst, ok := a.inventory.exact(g.Kind, g.Version); ok {
 			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
 				ui.Icon(c, icCheck).Size(12, 12).TextColor(t.Success)
 				ui.Text(c, "已安装 "+inst.Version).FontSize(11).TextColor(t.TextMuted).SingleLine()
@@ -893,7 +929,7 @@ func (a *App) vendorPicker(c *ui.Context) {
 					if opt.LTS {
 						a.chip(c, "LTS", t.Success, t.Success.Alpha(0.12))
 					}
-					if _, ok := core.Exact(a.installed, opt.Kind, opt.Version); ok {
+					if _, ok := a.inventory.exact(opt.Kind, opt.Version); ok {
 						ui.Text(c, "已安装").FontSize(11).TextColor(t.TextMuted)
 						return
 					}
@@ -943,7 +979,32 @@ func shortVendor(name string) string {
 func (a *App) doctorPage(c *ui.Context) {
 	t := c.Theme()
 	rep := a.report
-	ui.Scroll(c).Fill().Padding(20, 20, 24, 20).Gap(14).Children(func() {
+	sections := a.doctor.Sections
+	rowCount := 0
+	for _, sec := range sections {
+		if len(sec.Checks) > 0 {
+			rowCount += 1 + len(sec.Checks)
+		}
+	}
+	// Locate a row across the small, fixed number of report sections without
+	// walking or copying the checks that are outside the viewport.
+	locate := func(row int) (int, int) {
+		for i, sec := range sections {
+			if len(sec.Checks) == 0 {
+				continue
+			}
+			if row <= len(sec.Checks) {
+				return i, row - 1 // -1 identifies the section heading.
+			}
+			row -= 1 + len(sec.Checks)
+		}
+		return -1, -1
+	}
+	a.doctorList.Key = func(row int) any {
+		section, check := locate(row)
+		return fmt.Sprintf("doctor:%d:%d", section, check)
+	}
+	ui.Column(c).Fill().Padding(20, 20, 24, 20).Gap(14).Children(func() {
 
 		// Verdict banner: one line the user can read at a glance.
 		hero := a.card(c).Gap(8)
@@ -976,28 +1037,29 @@ func (a *App) doctorPage(c *ui.Context) {
 			})
 		})
 
-		// Problems first: a section list sorted that way puts the work at the
-		// top instead of burying it under green rows.
-		for _, sec := range sortedSections(rep.Sections) {
-			if len(sec.Checks) == 0 {
-				continue
-			}
-			card := a.card(c).Gap(2)
-			card.Children(func() {
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		// The cached report is already ordered with problems first. Only the
+		// section headings and checks in view build UI nodes.
+		a.card(c).Fill().Gap(0).Padding(12, 16).Children(func() {
+			ui.List(c, &a.doctorList, rowCount, func(row int) {
+				section, check := locate(row)
+				if section < 0 {
+					return
+				}
+				sec := sections[section]
+				if check >= 0 {
+					a.checkRow(c, sec.Checks[check])
+					return
+				}
+				ui.Row(c).Gap(8).Padding(10, 0, 8, 0).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, sec.Title).FontSize(13).Bold()
 					ui.Text(c, sec.Desc).FontSize(10.5).TextColor(t.TextMuted).SingleLine()
 					ui.Spacer(c)
-					if n := worstCount(sec); n > 0 {
+					if n := a.doctor.WorstCounts[section]; n > 0 {
 						a.chip(c, fmt.Sprintf("%d 项待处理", n), t.Warning, t.Warning.Alpha(0.12))
 					}
 				})
-				ui.Box(c).Height(6)
-				for _, ck := range sortedChecks(sec.Checks) {
-					a.checkRow(c, ck)
-				}
-			})
-		}
+			}).Grow(1)
+		})
 	})
 }
 
@@ -1054,12 +1116,12 @@ func (a *App) fixButton(c *ui.Context, ck core.Check) {
 				a.pushToast(err.Error())
 			} else {
 				a.pushToast("已写入 " + targets + "，新开终端生效")
+				a.requestServiceUpdate()
 			}
 		}
 	case core.FixRefresh:
 		if ui.Button(c, "重新扫描").Label("重新扫描 SDK").Clicked() {
 			a.refreshAsync()
-			a.recompute()
 		}
 	case core.FixOpenConfigDir:
 		if ui.Button(c, "打开").Label("打开配置目录").Clicked() {
@@ -1180,9 +1242,9 @@ func (a *App) settingsPage(c *ui.Context) {
 		integ := a.card(c).Gap(10)
 		integ.Children(func() {
 			ui.Text(c, "终端集成").FontSize(13).Bold()
-			sh := core.CurrentShell()
-			files := core.HookFiles(sh)
-			installed := core.HookInstalled(sh)
+			sh := a.settings.Shell
+			files := a.settings.HookFiles
+			installed := a.settings.HookInstalled
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 				ui.Column(c).Gap(3).Grow(1).MinWidth(0).Children(func() {
 					ui.Text(c, "在任何终端里自动切换").FontSize(12)
@@ -1190,7 +1252,7 @@ func (a *App) settingsPage(c *ui.Context) {
 						FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(520)
 					for _, f := range files {
 						mark := "·"
-						if core.HookInstalledIn(f) {
+						if a.settings.HookInstalledIn[f] {
 							mark = "✓"
 						}
 						ui.Text(c, mark+" "+f).FontSize(10).TextColor(t.TextMuted).
@@ -1204,6 +1266,7 @@ func (a *App) settingsPage(c *ui.Context) {
 							a.pushToast(err.Error())
 						} else {
 							a.pushToast("已移除钩子，新开的终端不再自动切换")
+							a.requestServiceUpdate()
 						}
 					}
 				} else if ui.PrimaryButton(c, "安装到 shell").Clicked() {
@@ -1212,6 +1275,7 @@ func (a *App) settingsPage(c *ui.Context) {
 						a.pushToast(err.Error())
 					} else {
 						a.pushToast("已写入 " + targets + "，新开终端生效")
+						a.requestServiceUpdate()
 					}
 				}
 			})
@@ -1226,16 +1290,16 @@ func (a *App) settingsPage(c *ui.Context) {
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, "Git 提交身份").FontSize(13).Bold()
 				ui.Spacer(c)
-				if a.svc.GitRulesInstalled() {
+				if a.settings.GitRulesInstalled {
 					a.chip(c, "自动套用中", t.Success, t.Success.Alpha(0.12))
 				} else {
 					a.chip(c, "未启用自动套用", t.TextMuted, t.SurfaceHover)
 				}
 			})
-			ui.Text(c, "按远端地址绑定用户名和邮箱：一个地址对应一套身份，不同服务器、不同组织各用各的，不用每次手动改。").
+			ui.Text(c, "一个项目可保存多个远端地址，每个地址可绑定多套用户名和邮箱。在项目页选择地址后，应用需要的身份。").
 				FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(560)
 
-			profiles := a.svc.GitProfiles()
+			profiles := a.settings.Profiles
 			if len(profiles) == 0 {
 				ui.Text(c, "还没有绑定。在项目页的 Git 卡里，按当前仓库的远端地址新建一条即可。").
 					FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(560)
@@ -1267,14 +1331,14 @@ func (a *App) settingsPage(c *ui.Context) {
 								TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 						})
 						if ui.Button(c, "删除").Label("删除这条绑定").Clicked() {
-							a.deleteGitProfile(prof.Key)
+							a.deleteGitProfile(prof.IdentityID())
 						}
 					})
 				}
 			}
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				if a.svc.GitRulesInstalled() {
+				if a.settings.GitRulesInstalled {
 					if ui.Button(c, "停止自动套用").Clicked() {
 						a.toggleGitRules(false)
 					}
@@ -1284,11 +1348,11 @@ func (a *App) settingsPage(c *ui.Context) {
 					}
 				}
 			})
-			if a.svc.GitRulesInstalled() {
+			if a.settings.GitRulesInstalled {
 				ui.Text(c, "规则写在全局 git 配置里的一段标记块中（原文件已备份为 .envmgr.bak），只增加 includeIf，不改你的 user.name。").
 					FontSize(10).TextColor(t.TextMuted).Wrap().MaxWidth(560)
 			}
-			if !core.IncludeIfByRemoteSupported() {
+			if a.settings.Ready && !a.settings.GitRemoteRulesSupported {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Icon(c, icAlert).Size(12, 12).TextColor(t.Warning)
 					ui.Text(c, "当前 git 版本低于 2.36，不支持按远端地址自动套用；绑定仍可手动写入单个仓库。").
@@ -1334,8 +1398,8 @@ func (a *App) settingsPage(c *ui.Context) {
 			ui.Text(c, "终端集成").FontSize(13).Bold()
 			ui.Text(c, "把下面这段加到 shell 启动文件里，进入项目目录时自动切换版本。EnvMgr 不会自己修改任何配置文件。").
 				FontSize(11).TextColor(t.TextMuted).Wrap().MaxWidth(680)
-			shell := core.CurrentShell()
-			script := core.HookScript(shell)
+			shell := a.settings.Shell
+			script := a.settings.HookScript
 			box := ui.Column(c).Padding(10).Radius(8).Background(t.Background).Border(1, t.Border)
 			box.Children(func() {
 				ui.Text(c, script).FontSize(10.5).Font("monospace").TextColor(t.TextMuted).MaxLines(8)

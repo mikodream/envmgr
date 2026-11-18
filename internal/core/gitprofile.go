@@ -1,26 +1,29 @@
 package core
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// GitProfile binds a name and email to a remote address. The address is the key
-// because that is what actually changes between identities: the same person
-// commits as one identity to a company's GitHub org and as another to their own
-// repositories, and the remote URL is the only thing that reliably tells those
-// apart.
+// GitProfile stores one identity for a remote address. Several identities may
+// share a key; explicit selection chooses which one the address uses.
 //
 // The key is normalized: scheme, credentials, port, and the .git suffix are
 // dropped, so `git@github.com:acme/app.git` and
 // `https://github.com/acme/app` are the same key. It may name a host, an
 // owner, or one repository, and the most specific match wins.
 type GitProfile struct {
+	// ID remains stable when an identity is edited. Legacy entries derive one.
+	ID string
+	// Active chooses the identity used by remote-matched global rules.
+	Active bool
 	// Key is the normalized remote address, e.g. "github.com/acme".
 	Key string
 	// Label is the optional name the user gave this binding, such as "公司账号".
@@ -31,6 +34,19 @@ type GitProfile struct {
 	Email string
 	Note  string
 	Added time.Time
+}
+
+// IdentityID also makes pre-ID profiles addressable without rewriting storage.
+func (p GitProfile) IdentityID() string {
+	if p.ID != "" {
+		return p.ID
+	}
+	key := p.Key
+	if normalized, ok := NormalizeRemote(key); ok {
+		key = normalized
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(key) + "\x00" + p.Name + "\x00" + p.Email))
+	return fmt.Sprintf("git-%x", sum[:])
 }
 
 // Valid reports whether the profile can be installed as a rule.
@@ -189,13 +205,67 @@ func RemoteKeyLevels(raw string) []string {
 // a whole-host binding.
 func MatchGitProfile(remote string, profiles []GitProfile) *GitProfile {
 	for _, level := range RemoteKeyLevels(remote) {
+		first := -1
 		for i := range profiles {
 			if strings.EqualFold(profiles[i].Key, level) {
-				return &profiles[i]
+				if profiles[i].Active {
+					return &profiles[i]
+				}
+				if first < 0 {
+					first = i
+				}
 			}
+		}
+		if first >= 0 {
+			return &profiles[first]
 		}
 	}
 	return nil
+}
+
+// activeGitProfiles chooses one valid identity per key, keeping legacy first
+// entries when no explicit selection exists. Git's last matching include wins,
+// so broader keys must be emitted before more specific keys.
+func activeGitProfiles(profiles []GitProfile) []GitProfile {
+	out := make([]GitProfile, 0, len(profiles))
+	byKey := map[string]int{}
+	for _, p := range profiles {
+		if !p.Valid() {
+			continue
+		}
+		key := strings.ToLower(p.Key)
+		if i, exists := byKey[key]; exists {
+			if p.Active && !out[i].Active {
+				out[i] = p
+			}
+			continue
+		}
+		byKey[key] = len(out)
+		out = append(out, p)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		iDepth, jDepth := strings.Count(out[i].Key, "/"), strings.Count(out[j].Key, "/")
+		if iDepth != jDepth {
+			return iDepth < jDepth
+		}
+		return strings.ToLower(out[i].Key) < strings.ToLower(out[j].Key)
+	})
+	return out
+}
+
+// normalizeGitProfileActives repairs legacy or deleted selections in store order.
+func normalizeGitProfileActives(profiles []GitProfile) {
+	selected := map[string]int{}
+	for i := range profiles {
+		key := strings.ToLower(profiles[i].Key)
+		previous, exists := selected[key]
+		if !exists || profiles[i].Active && !profiles[previous].Active {
+			selected[key] = i
+		}
+	}
+	for i := range profiles {
+		profiles[i].Active = selected[strings.ToLower(profiles[i].Key)] == i
+	}
 }
 
 // IncludePatterns returns the `includeIf` patterns that make git apply a profile
@@ -300,13 +370,10 @@ func GitRulesText(profiles []GitProfile) string {
 	var b strings.Builder
 	b.WriteString(gitRulesBegin + "\n")
 	b.WriteString("# 由 EnvMgr 生成：按远端地址选择提交身份。改动会在下次保存时被覆盖。\n")
-	for _, p := range profiles {
-		if !p.Valid() {
-			continue
-		}
+	for _, p := range activeGitProfiles(profiles) {
 		file := filepath.ToSlash(ProfileFile(p.Key))
 		for _, pattern := range IncludePatterns(p.Key) {
-			fmt.Fprintf(&b, "[includeIf \"hasconfig:remote.*.url:%s\"]\n\tpath = %s\n", pattern, file)
+			fmt.Fprintf(&b, "[includeIf %s]\n\tpath = %s\n", strconv.Quote("hasconfig:remote.*.url:"+pattern), strconv.Quote(file))
 		}
 	}
 	b.WriteString(gitRulesEnd + "\n")
@@ -327,11 +394,8 @@ func InstallGitRules(profiles []GitProfile) error {
 		return fmt.Errorf("创建 %s 失败: %w", dir, err)
 	}
 	// One identity file per key.
-	for _, p := range profiles {
-		if !p.Valid() {
-			continue
-		}
-		body := "# 由 EnvMgr 生成：远端地址 " + p.Key + "\n[user]\n\tname = " + p.Name + "\n\temail = " + p.Email + "\n"
+	for _, p := range activeGitProfiles(profiles) {
+		body := "# 由 EnvMgr 生成：远端身份\n[user]\n\tname = " + strconv.Quote(p.Name) + "\n\temail = " + strconv.Quote(p.Email) + "\n"
 		if err := os.WriteFile(ProfileFile(p.Key), []byte(body), 0o644); err != nil {
 			return fmt.Errorf("写入 %s 失败: %w", ProfileFile(p.Key), err)
 		}

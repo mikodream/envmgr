@@ -3,9 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -30,7 +30,7 @@ var pageTitles = []struct {
 }{
 	{"概览", "项目环境、已装 SDK 与需要处理的问题", icGauge},
 	{"项目", "为每个项目固定 SDK 版本，进入目录即切换", icFolder},
-	{"工具链", "这台机器上已有的版本，以及它们的来源", icLayers},
+	{"工具链", "已装 SDK 与版本管理器，分别查看和管理", icLayers},
 	{"下载安装", "从官方与镜像源安装新的 SDK 版本", icDownload},
 	{"体检", "逐项检查配置，包括终端钩子是否装好", icCheck},
 	{"设置", "数据目录、镜像、终端与外观", icSettings},
@@ -68,6 +68,9 @@ type App struct {
 
 	// Discovery snapshot.
 	installed []core.Installed
+	inventory inventoryView
+	settings  settingsSnapshot
+	doctor    doctorView
 	projects  []core.Project
 	managers  []core.ManagerState
 	syncedAt  string
@@ -84,7 +87,8 @@ type App struct {
 	expandEmpty bool
 
 	// Git panel of the opened project.
-	gitInfo core.GitInfo
+	gitReady bool
+	gitInfo  core.GitInfo
 	// gitFor is the directory gitInfo describes, so a selection change refetches
 	// instead of showing another project's repository.
 	gitFor string
@@ -100,16 +104,40 @@ type App struct {
 	gitError string
 	// Bindings of an identity to a remote address. gitBind opens the editor and
 	// the other fields are its buffers.
-	gitBind      bool
-	gitBindKey   string
-	gitBindLabel string
-	gitBindName  string
-	gitBindEmail string
-	gitBindNote  string
+	gitSelectedRemote   string
+	gitRemoteOpen       bool
+	gitRemoteExisting   bool
+	gitRemoteRemove     bool
+	gitRemoteRemoveName string
+	gitRemoteName       string
+	gitRemoteURL        string
+	gitRemotePick       gitSelectChoice
+	gitBranchPick       gitSelectChoice
+	gitBranchCreate     bool
+	gitBranchName       string
+	gitBranchDelete     bool
+	gitBranchDeleteName string
+	gitProfilesOpen     bool
+	codeStats           core.CodeStats
+	codeStatsFor        string
+	codeStatsReady      bool
+	codeStatsLoading    bool
+	codeStatsCancel     context.CancelFunc
+	codeStatsGeneration uint64
+	gitBindID           string
+	gitBind             bool
+	gitBindKey          string
+	gitBindLabel        string
+	gitBindName         string
+	gitBindEmail        string
+	gitBindNote         string
 
 	// Toolchains page.
 	toolchainKind int // index into core.Kinds
+	toolchainView int // 0: installed SDKs, 1: version managers
+	managerList   ui.ListState
 	installedList ui.ListState
+	doctorList    ui.ListState
 
 	// Downloads page.
 	downloadKind  int
@@ -123,8 +151,9 @@ type App struct {
 	remoteLoaded bool
 	// remoteCache keeps each SDK's list, so switching the tab back and forth
 	// does not refetch what is already here.
-	remoteCache map[core.Kind][]core.Remote
-	filterLTS   bool
+	remoteCache  map[core.Kind][]core.Remote
+	remoteGroups map[core.Kind]remoteGroupedView
+	filterLTS    bool
 	// vendorPick is open while the user chooses which vendor build of a
 	// version to download.
 	vendorPick *vendorPick
@@ -160,7 +189,9 @@ type App struct {
 	cancels       []context.CancelFunc
 	pendingToasts []string
 
-	mu sync.Mutex
+	mu          sync.Mutex
+	serviceSync *updateQueue
+	refreshing  atomic.Bool
 }
 
 // New builds the app state around a service.
@@ -174,14 +205,16 @@ func New(svc *core.Service) *App {
 	a.followMark = cfg.FollowMarkers
 	a.shellHook = cfg.ShellHook
 	a.syncAndRecompute()
-	svc.OnChange(func() { a.refreshAsync() })
+	a.settings = loadSettingsSnapshot(svc)
 	return a
 }
 
 // SetWindow records the window the app draws into.
 func (a *App) SetWindow(win *mygo.Window) {
 	a.win = win
-	a.refreshAsync()
+	// Capture the window once: background callbacks never read mutable UI state.
+	a.watchService(win.Update, win.Invalidate)
+	a.serviceSync.request()
 }
 
 // SetPage switches the visible page, for the command line's --page flag and
@@ -206,6 +239,14 @@ func (a *App) OpenProject(index int, expandEmpty bool) {
 	// A different project is a different repository, so the editor and its
 	// message do not carry over.
 	a.gitEdit = false
+	a.gitBind = false
+	a.gitRemoteOpen = false
+	a.gitRemoteRemove = false
+	a.gitBranchCreate = false
+	a.gitBranchDelete = false
+	a.gitProfilesOpen = false
+	a.gitSelectedRemote = ""
+	a.gitBindID = ""
 	a.gitError = ""
 	a.gitFor = ""
 }
@@ -237,7 +278,9 @@ func (a *App) OpenGitBinding() {
 	a.gitBindLabel = ""
 	a.gitBindName = info.Identity.Name
 	a.gitBindEmail = info.Identity.Email
+	a.gitBindID = ""
 	if match := a.svc.MatchGitProfileFor(info.Remote); match != nil {
+		a.gitBindID = match.IdentityID()
 		a.gitBindKey = match.Key
 		a.gitBindLabel = match.Label
 		a.gitBindName = match.Name
@@ -269,7 +312,17 @@ func (a *App) SetRemote(kind core.Kind, list []core.Remote) {
 }
 
 // SetToolchainKind selects the SDK tab, for the snapshot tool.
-func (a *App) SetToolchainKind(k core.Kind) { a.toolchainKind = kindIndexOf(k) }
+func (a *App) SetToolchainKind(k core.Kind) {
+	index := kindIndexOf(k)
+	if a.toolchainKind != index {
+		a.installedList = ui.ListState{}
+	}
+	a.toolchainKind = index
+	a.toolchainView = 0
+}
+
+// OpenManagers opens the independent manager view, also used by offline previews.
+func (a *App) OpenManagers() { a.page = PageToolchains; a.toolchainView = 1; a.requestServiceUpdate() }
 
 // SetDownloadKind selects the download tab, for the snapshot tool.
 func (a *App) SetDownloadKind(k core.Kind) { a.downloadKind = kindIndexOf(k) }
@@ -347,6 +400,7 @@ func managerLabel(manager string) string {
 // syncNow copies the service's state into the app, on the main thread.
 func (a *App) syncNow() {
 	a.installed = a.svc.Installed()
+	a.inventory = buildInventoryView(a.installed)
 	a.projects = a.svc.Projects()
 	a.managers = a.svc.Managers()
 	a.syncedAt = nowLabel()
@@ -354,23 +408,19 @@ func (a *App) syncNow() {
 
 // refreshAsync rediscovers in the background and repaints when done.
 func (a *App) refreshAsync() {
-	if a.win == nil {
+	if a.win == nil || !a.refreshing.CompareAndSwap(false, true) {
 		return
 	}
+	win := a.win
 	a.syncing = true
-	a.win.Invalidate()
+	win.Invalidate()
 	go func() {
+		// Refresh emits a change notification; its listener queues a snapshot,
+		// never another Refresh. Repeated clicks share this in-flight scan.
 		a.svc.Refresh()
-		installed := a.svc.Installed()
-		projects := a.svc.Projects()
-		managers := a.svc.Managers()
-		a.win.Update(func() {
-			a.installed = installed
-			a.projects = projects
-			a.managers = managers
+		win.Update(func() {
 			a.syncing = false
-			a.syncedAt = nowLabel()
-			a.recompute()
+			a.refreshing.Store(false)
 		})
 	}()
 }
@@ -593,9 +643,8 @@ func (a *App) onPageEnter(index int) {
 		if len(a.remote) == 0 || a.remoteKind != a.downloadsKind() {
 			a.loadRemote(a.downloadsKind(), false)
 		}
-	case PageToolchains, PageProjects, PageDoctor:
-		a.syncNow()
-		a.recompute()
+	case PageToolchains, PageProjects, PageDoctor, PageSettings:
+		a.requestServiceUpdate()
 	}
 }
 
@@ -660,11 +709,11 @@ func (a *App) iconButton(c *ui.Context, icon *ui.SVG, label string, danger bool)
 	if danger {
 		fg = t.Danger
 	}
-	btn := ui.Button(c, "").Size(28, 28).Radius(7).Center()
+	btn := ui.Button(c, "").Size(28, 28).Padding(0).Gap(0).Shrink(0).Radius(7).Center()
 	if btn.Hovered() {
 		btn.Background(t.SurfaceHover)
 	}
-	btn.Children(func() { ui.Icon(c, icon).Size(14, 14).TextColor(fg) })
+	btn.Children(func() { ui.Icon(c, icon).Size(14, 14).Shrink(0).TextColor(fg) })
 	btn.Label(label).Tooltip(label)
 	return btn
 }
@@ -751,11 +800,7 @@ func kindIndexOf(kind core.Kind) int {
 
 // sortedInstalled returns the versions of a kind, newest first.
 func (a *App) sortedInstalled(kind core.Kind) []core.Installed {
-	list := core.InstalledOf(a.installed, kind)
-	sort.SliceStable(list, func(i, j int) bool {
-		return core.ParseVersion(list[i].Version).Compare(core.ParseVersion(list[j].Version)) > 0
-	})
-	return list
+	return a.inventory.list(kind)
 }
 
 // projectRows is the project list filtered by the search field.

@@ -15,7 +15,7 @@ import (
 // The second result reports whether a binding matched, so callers can colour a
 // bound address differently from a plain one.
 func (a *App) gitAddressLabel(remote string) (string, bool) {
-	if match := a.svc.MatchGitProfileFor(remote); match != nil {
+	if match := core.MatchGitProfile(remote, a.settings.Profiles); match != nil {
 		return match.Display(), true
 	}
 	if key, ok := core.NormalizeRemote(remote); ok {
@@ -40,7 +40,11 @@ func (a *App) gitPanel(c *ui.Context, p core.Project) {
 				ui.Icon(c, icBranch).Size(15, 15).TextColor(t.TextMuted)
 			})
 			ui.Text(c, "Git").FontSize(12.5).Bold()
-			a.gitStateChip(c)
+			if a.gitReady {
+				a.gitStateChip(c)
+			} else {
+				a.chip(c, "读取中", t.TextMuted, t.SurfaceHover)
+			}
 			ui.Spacer(c)
 			if a.gitInfo.Available && a.gitInfo.Repo {
 				if a.button(c, icRefresh, "刷新").Label("刷新 Git 状态").Clicked() {
@@ -52,10 +56,14 @@ func (a *App) gitPanel(c *ui.Context, p core.Project) {
 		})
 
 		switch {
+		case !a.gitReady:
+			ui.Text(c, "正在后台读取 Git 状态…").FontSize(11).TextColor(t.TextMuted)
 		case !a.gitInfo.Available:
 			a.gitMissing(c)
 		case !a.gitInfo.Repo:
 			a.gitNotRepo(c, p)
+			ui.Box(c).Height(1).FillWidth().Background(t.Border)
+			a.gitCodeStats(c, p)
 		default:
 			a.gitRepoBody(c, p)
 		}
@@ -70,18 +78,43 @@ func (a *App) gitPanel(c *ui.Context, p core.Project) {
 	})
 }
 
-// syncGit loads the repository state for the selected project, and re-seeds the
-// edit buffers when the selection changed. Service.Git caches, so this does not
-// spawn git on every frame.
+// syncGit reads only the cache while drawing. A first read is queued in the
+// background, so even a slow repository never blocks a wheel animation frame.
 //
 // It deliberately does not close the editor: the editor is opened by the user,
 // and the first frame after opening a project sees a changed path, so resetting
 // here would close what was just opened.
 func (a *App) syncGit(p core.Project) {
 	first := a.gitFor != p.Path
+	previous := a.gitInfo
 	a.gitFor = p.Path
-	a.gitInfo = a.svc.Git(p.Path)
-	if first || !a.gitEdit {
+	a.gitInfo, a.gitReady = a.svc.PeekGit(p.Path)
+	if first || (a.gitReady && previous.PushRemote != a.gitInfo.PushRemote) {
+		a.gitSelectedRemote = ""
+		a.gitRemotePick = gitSelectChoice{}
+	}
+	if first || previous.Branch != a.gitInfo.Branch || previous.Detached != a.gitInfo.Detached {
+		a.gitBranchPick = gitSelectChoice{}
+	}
+	if first {
+		a.gitBranchCreate = false
+		a.gitBranchDelete = false
+		a.gitProfilesOpen = false
+		a.gitRemoteOpen = false
+		a.gitRemoteRemove = false
+		a.gitError = ""
+		if a.codeStatsFor != p.Path {
+			if a.codeStatsCancel != nil {
+				a.codeStatsCancel()
+			}
+			a.codeStatsGeneration++
+			a.codeStatsFor = p.Path
+			a.codeStats = core.CodeStats{}
+			a.codeStatsReady = false
+			a.codeStatsLoading = false
+		}
+	}
+	if a.gitReady && (first || !a.gitEdit) {
 		a.seedGitBuffers()
 	}
 }
@@ -179,141 +212,19 @@ func (a *App) gitNotRepo(c *ui.Context, p core.Project) {
 // gitRepoBody shows the repository state and the identity in use.
 func (a *App) gitRepoBody(c *ui.Context, p core.Project) {
 	t := c.Theme()
-
-	ui.Row(c).Gap(16).Wrap().Children(func() {
-		branch := a.gitInfo.Branch
-		if a.gitInfo.Detached {
-			branch = "游离 HEAD"
-		}
-		if branch == "" {
-			branch = "未知分支"
-		}
-		a.gitFact(c, "分支", branch)
-		if a.gitInfo.Remote != "" {
-			a.gitFact(c, "远端", a.gitInfo.Remote)
-		}
-		if a.gitInfo.Root != "" && !samePath(a.gitInfo.Root, p.Path) {
-			// The project sits inside a bigger repository; say which one, or the
-			// status numbers look like they belong to this directory alone.
-			a.gitFact(c, "仓库根", a.gitInfo.Root)
-		}
-		if a.gitInfo.Repo {
-			a.gitFact(c, "改动", changeSummary(a.gitInfo))
-		}
-	})
-
+	a.gitRemotePicker(c, p)
 	ui.Box(c).Height(1).FillWidth().Background(t.Border)
-
+	a.gitBranchPanel(c, p)
+	ui.Box(c).Height(1).FillWidth().Background(t.Border)
 	a.identityRows(c, p)
-
-	a.remoteBinding(c, p)
+	ui.Box(c).Height(1).FillWidth().Background(t.Border)
+	a.gitCodeStats(c, p)
 }
 
 // remoteBinding shows the identity that the remote address selects, and the way
 // to bind one. The address is the key because it is what differs between
 // identities: the same person commits to a company org as one name and to their
 // own repositories as another.
-func (a *App) remoteBinding(c *ui.Context, p core.Project) {
-	t := c.Theme()
-	remote := a.gitInfo.Remote
-	if remote == "" {
-		// No remote yet, so there is nothing to key an identity by.
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Icon(c, icInfo).Size(12, 12).TextColor(t.TextMuted)
-			ui.Text(c, "这个仓库还没有远端地址，暂时无法按地址绑定身份。").
-				FontSize(10.5).TextColor(t.TextMuted)
-		})
-		return
-	}
-
-	key, ok := core.NormalizeRemote(remote)
-	if !ok {
-		ui.Text(c, "远端地址看起来是本地路径，无法按地址绑定。").
-			FontSize(10.5).TextColor(t.TextMuted)
-		return
-	}
-	matched := a.svc.MatchGitProfileFor(remote)
-	rulesOn := a.svc.GitRulesInstalled()
-
-	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, "按远端地址绑定").FontSize(11).Bold().TextColor(t.TextMuted)
-		// The binding's name if it has one, otherwise the address it covers.
-		if matched != nil {
-			a.chip(c, matched.Display(), t.TextMuted, t.SurfaceHover)
-			if matched.Label != "" {
-				ui.Text(c, key).FontSize(10).TextColor(t.TextMuted).
-					Font("monospace").SingleLine().Ellipsis("…")
-			}
-		} else {
-			a.chip(c, key, t.TextMuted, t.SurfaceHover)
-		}
-		ui.Spacer(c)
-		if a.gitInfo.Identity.NameSource == core.SourceRule {
-			a.chip(c, "已生效", t.Success, t.Success.Alpha(0.12))
-		}
-	})
-
-	switch {
-	case matched != nil && rulesOn:
-		ui.Text(c, fmt.Sprintf("这个地址绑定的是 %s <%s>，git 会因为远端地址自动用上它。",
-			matched.Name, matched.Email)).
-			FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(620)
-	case matched != nil:
-		// Bound but not installed: be explicit rather than showing a value git
-		// will not actually use.
-		ui.Text(c, fmt.Sprintf("这个地址绑定的是 %s <%s>，但自动套用的规则还没安装，所以还没生效。",
-			matched.Name, matched.Email)).
-			FontSize(10.5).TextColor(t.Warning).Wrap().MaxWidth(620)
-	case rulesOn:
-		ui.Text(c, "这个地址还没有绑定，提交时用当前的提交身份。").
-			FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(620)
-	default:
-		ui.Text(c, "按地址绑定后，所有这个地址下的仓库都会自动用对应的用户名和邮箱，不用逐个仓库设置。").
-			FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(620)
-	}
-
-	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		if matched != nil {
-			if ui.Button(c, "写入本项目").Label("把这条绑定写进本仓库").Clicked() {
-				a.applyProfileLocally(p, *matched)
-			}
-		}
-		if rulesOn {
-			if ui.Button(c, "停止自动套用").Clicked() {
-				a.toggleGitRules(false)
-			}
-		} else if matched != nil || len(a.svc.GitProfiles()) > 0 {
-			if ui.PrimaryButton(c, "让 git 自动套用").Clicked() {
-				a.toggleGitRules(true)
-			}
-		}
-		if !a.gitBind {
-			label := "绑定此地址"
-			if matched != nil {
-				label = "改绑定"
-			}
-			if a.button(c, icPlus, label).Clicked() {
-				a.gitBind = true
-				// Seed with the name and address of the binding that already
-				// covers this remote, or whatever a commit would use now — the
-				// things the user already knows.
-				a.gitBindKey = key
-				a.gitBindLabel = ""
-				a.gitBindName = a.gitInfo.Identity.Name
-				a.gitBindEmail = a.gitInfo.Identity.Email
-				a.gitBindNote = ""
-				if matched != nil {
-					a.gitBindKey = matched.Key
-					a.gitBindLabel = matched.Label
-					a.gitBindName = matched.Name
-					a.gitBindEmail = matched.Email
-				}
-			}
-		}
-	})
-
-}
-
 // gitBindDialog is the remote-address binding editor, shown as a dialog so the
 // form is never clipped by the project page's scroll area.
 func (a *App) gitBindDialog(c *ui.Context) {
@@ -324,7 +235,7 @@ func (a *App) gitBindDialog(c *ui.Context) {
 	open := true
 	ui.Modal(c, &open, func() {
 		ui.Text(c, "按远端地址绑定提交身份").FontSize(14).Bold()
-		ui.Text(c, "绑一次，这个地址下的仓库都会自动用这套用户名和邮箱。填到组织一级可以覆盖整个组织。").
+		ui.Text(c, "同一个地址可以保存多套身份。保存后回到地址列表，点击「应用此身份」切换下一次提交的署名。").
 			FontSize(11).TextColor(t.TextMuted).Wrap().MaxWidth(440)
 		ui.Column(c).Gap(8).Children(func() {
 			ui.Column(c).Gap(3).Children(func() {
@@ -372,7 +283,8 @@ func (a *App) gitBindDialog(c *ui.Context) {
 // saveBinding stores the binding being edited.
 func (a *App) saveBinding(currentKey string) {
 	profile := core.GitProfile{
-		Key:   strings.ToLower(strings.TrimSpace(a.gitBindKey)),
+		ID:    a.gitBindID,
+		Key:   strings.TrimSpace(a.gitBindKey),
 		Label: strings.TrimSpace(a.gitBindLabel),
 		Name:  strings.TrimSpace(a.gitBindName),
 		Email: strings.TrimSpace(a.gitBindEmail),
@@ -382,7 +294,9 @@ func (a *App) saveBinding(currentKey string) {
 		a.gitError = "地址、用户名、邮箱都要填。"
 		return
 	}
-	if _, ok := core.NormalizeRemote(profile.Key); !ok {
+	if normalized, ok := core.NormalizeRemote(profile.Key); ok {
+		profile.Key = normalized
+	} else {
 		a.gitError = "地址看起来不完整，例如 github.com/acme 或 git@github.com:acme/app.git。"
 		return
 	}
@@ -560,6 +474,11 @@ func (a *App) identityRows(c *ui.Context, p core.Project) {
 		ui.Text(c, "user.name / user.email").FontSize(10).
 			Font("monospace").TextColor(t.TextMuted)
 		ui.Spacer(c)
+		if a.gitInfo.Repo && len(a.gitInfo.Remotes) > 0 && !a.gitEdit {
+			if ui.Button(c, "身份库").Label("打开远端身份库").Clicked() {
+				a.gitProfilesOpen = true
+			}
+		}
 		if !a.gitEdit {
 			// "设置身份" when there is nothing to inherit; otherwise the action
 			// is a change, not a prerequisite.

@@ -70,9 +70,20 @@ func PrintUsage(w io.Writer) {
   envmgr git init                 把当前目录变成 Git 仓库
   envmgr git set --name 张三 --email z@ex.com
                                   只写本项目的 user.name / user.email
+  envmgr git remote list --dir 项目
+                                  列出项目的全部远端（含推送地址）
+  envmgr git remote add gitee https://gitee.com/acme/app.git --dir 项目
+                                  添加或更新一个命名远端
+  envmgr git remote rm gitee --dir 项目
+                                  删除一个命名远端
   envmgr git profile add github.com/acme --label 公司账号 --name 张三 --email z@acme.com
-                                  按远端地址绑定一套提交身份
-  envmgr git profile list         列出所有地址绑定
+                                  同一地址可保存多套提交身份
+  envmgr git profile list         列出身份 ID 与当前启用状态
+  envmgr git profile use ID --dir 项目
+                                  切换地址身份并写入项目的提交身份
+  envmgr git profile edit ID --name 李四
+                                  按 ID 修改指定身份
+  envmgr git profile rm ID        删除指定身份（也兼容按地址删除）
   envmgr git rules install        让 git 按远端地址自动套用这些绑定
 
 EnvMgr 不修改任何全局环境变量：
@@ -568,10 +579,18 @@ func doctorDir(svc *core.Service, dir string) int {
 	return 0
 }
 
-// cmdGit reports a directory's repository state, and can initialise one or set
-// its identity. It never touches the global git config: everything it writes
-// goes to the repository's own .git/config.
+// cmdGit reports repository state and dispatches repository, remote, identity,
+// and opt-in global rule commands.
 func cmdGit(svc *core.Service, args []string) int {
+	for i, arg := range args {
+		switch arg {
+		case "--dir", "--name", "--email", "--label":
+			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
+				fmt.Fprintf(os.Stderr, "%s 需要一个参数值\n", arg)
+				return 2
+			}
+		}
+	}
 	dir, args := flagValue(args, "dir", "")
 	name, args := flagValue(args, "name", "")
 	email, args := flagValue(args, "email", "")
@@ -585,11 +604,19 @@ func cmdGit(svc *core.Service, args []string) int {
 		action = args[0]
 		args = args[1:]
 	}
-	// A binding is about a remote address, not a directory, so these two never
-	// resolve one: the bare word after them is the address or the verb.
+	// Resolve --dir independently: profile IDs and remote names are positional
+	// arguments, and must never be interpreted as project directories.
+	if dir != "" {
+		dir = resolveDir(svc, dir)
+	}
 	switch action {
 	case "profile":
-		return cmdGitProfile(svc, args, label, name, email)
+		return cmdGitProfile(svc, args, dir, label, name, email)
+	case "remote":
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+		return cmdGitRemote(svc, args, dir)
 	case "rules":
 		return cmdGitRules(svc, args)
 	}
@@ -626,12 +653,7 @@ func cmdGit(svc *core.Service, args []string) int {
 			} else {
 				fmt.Println("分支  " + info.Branch)
 			}
-			if info.Remote != "" {
-				fmt.Println("远端  " + info.Remote)
-				if key, ok := core.NormalizeRemote(info.Remote); ok {
-					fmt.Println("地址  " + key)
-				}
-			}
+			printGitRemotes(info.Remotes)
 			if !info.Commits {
 				fmt.Println("提交  还没有提交")
 			} else if info.Clean() {
@@ -676,12 +698,14 @@ func cmdGit(svc *core.Service, args []string) int {
 
 	fmt.Fprintf(os.Stderr, "不认识的 git 子命令 %q\n", action)
 	fmt.Fprintln(os.Stderr, "可用: envmgr git [status] | envmgr git init | envmgr git set --name X --email Y")
-	fmt.Fprintln(os.Stderr, "      envmgr git profile list | add | rm | envmgr git rules install | uninstall")
+	fmt.Fprintln(os.Stderr, "      envmgr git remote list | add 名称 URL | rm 名称 [--dir 项目]")
+	fmt.Fprintln(os.Stderr, "      envmgr git profile list | add | edit ID | use ID [--dir 项目] | rm ID或地址")
+	fmt.Fprintln(os.Stderr, "      envmgr git rules install | uninstall")
 	return 2
 }
 
-// cmdGitProfile manages identity bindings, keyed by remote address.
-func cmdGitProfile(svc *core.Service, args []string, label, name, email string) int {
+// cmdGitProfile manages individually identified identities at remote addresses.
+func cmdGitProfile(svc *core.Service, args []string, dir, label, name, email string) int {
 	sub := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub = args[0]
@@ -695,11 +719,11 @@ func cmdGitProfile(svc *core.Service, args []string, label, name, email string) 
 			return 0
 		}
 		for _, p := range profiles {
-			mark := " "
-			if p.Label != "" {
-				mark = "*"
+			state := "未启用"
+			if p.Active {
+				state = "已启用"
 			}
-			fmt.Printf("%s %-14s %s  <%s>\n", mark, p.Display(), p.Name, p.Email)
+			fmt.Printf("%s  [%s] %-14s %s  <%s>\n", p.IdentityID(), state, p.Display(), p.Name, p.Email)
 			fmt.Printf("    %s\n", p.Key)
 		}
 		if svc.GitRulesInstalled() {
@@ -709,6 +733,51 @@ func cmdGitProfile(svc *core.Service, args []string, label, name, email string) 
 		}
 		fmt.Printf("规则文件  %s\n", core.GlobalGitConfig())
 		return 0
+
+	case "use":
+		if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+			fmt.Fprintln(os.Stderr, "用法: envmgr git profile use ID [--dir 项目或目录]")
+			return 2
+		}
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+		if err := svc.SelectGitProfile(dir, args[0]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Printf("已选择身份 %s → %s\n", args[0], dir)
+		printGitIdentity(svc.Git(dir).Identity)
+		return 0
+
+	case "edit":
+		if len(args) != 1 || strings.HasPrefix(args[0], "-") || (name == "" && email == "" && label == "") {
+			fmt.Fprintln(os.Stderr, "用法: envmgr git profile edit ID [--name 名字] [--email 邮箱] [--label 显示名]")
+			return 2
+		}
+		for _, p := range svc.GitProfiles() {
+			if p.IdentityID() != args[0] {
+				continue
+			}
+			p.ID = p.IdentityID()
+			if name != "" {
+				p.Name = name
+			}
+			if email != "" {
+				p.Email = email
+			}
+			if label != "" {
+				p.Label = label
+			}
+			if err := svc.SaveGitProfile(p); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+			fmt.Printf("已修改身份 %s → %s <%s>\n", p.IdentityID(), p.Name, p.Email)
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "没有找到身份 %q\n", args[0])
+		return 1
 
 	case "add", "set":
 		// The first bare word is the address.
@@ -720,7 +789,7 @@ func cmdGitProfile(svc *core.Service, args []string, label, name, email string) 
 			key = a
 			break
 		}
-		if key == "" || name == "" || email == "" {
+		if len(args) != 1 || key == "" || name == "" || email == "" {
 			fmt.Fprintln(os.Stderr, "用法: envmgr git profile add 地址 --name 名字 --email 邮箱 [--label 显示名]")
 			fmt.Fprintln(os.Stderr, "      地址可以写到组织一级，例如 github.com/acme")
 			return 2
@@ -751,8 +820,8 @@ func cmdGitProfile(svc *core.Service, args []string, label, name, email string) 
 			key = a
 			break
 		}
-		if key == "" {
-			fmt.Fprintln(os.Stderr, "用法: envmgr git profile rm 地址")
+		if len(args) != 1 || key == "" {
+			fmt.Fprintln(os.Stderr, "用法: envmgr git profile rm ID或地址")
 			return 2
 		}
 		normalized := key
@@ -768,7 +837,7 @@ func cmdGitProfile(svc *core.Service, args []string, label, name, email string) 
 	}
 
 	fmt.Fprintf(os.Stderr, "不认识的 git profile 子命令 %q\n", sub)
-	fmt.Fprintln(os.Stderr, "可用: envmgr git profile list | add | rm")
+	fmt.Fprintln(os.Stderr, "可用: envmgr git profile list | add | edit ID | use ID [--dir 项目] | rm ID或地址")
 	return 2
 }
 
@@ -825,7 +894,7 @@ func cmdGitRules(svc *core.Service, args []string) int {
 // or directory name.
 func isGitAction(s string) bool {
 	switch s {
-	case "status", "init", "set", "profile", "rules":
+	case "status", "init", "set", "remote", "profile", "rules":
 		return true
 	}
 	return false

@@ -32,6 +32,7 @@ func main() {
 	demo := flag.Bool("demo", true, "seed demo projects in a temporary home")
 	live := flag.Bool("live", false, "use this machine as it really is, no demo data")
 	kind := flag.String("kind", "", "SDK tab to show, e.g. java")
+	managers := flag.Bool("managers", false, "show the independent version manager view")
 	openProject := flag.Int("project", -1, "open this project index in the projects page")
 	openProjectName := flag.String("project-name", "", "open the project with this directory name")
 	gitEdit := flag.Bool("git-edit", false, "open the Git identity editor on the project page")
@@ -104,6 +105,9 @@ func main() {
 			continue
 		}
 		a.SetPage(p.page)
+		if p.page == app.PageToolchains && *managers {
+			a.OpenManagers()
+		}
 		if *dialog == "add" && p.page == app.PageToolchains {
 			a.OpenAddDialog()
 		}
@@ -139,6 +143,9 @@ func main() {
 				log.Printf("no source chooser for %s", *vendorVersion)
 			}
 		}
+		if p.page == app.PageProjects {
+			a.PrepareProjectStats()
+		}
 		var img = ui.Render(a.View, *w, *h, float32(*scale))
 		if *dark {
 			tt := ui.NewTesterWith(a.View, *w, *h, ui.TesterOptions{Dark: true})
@@ -147,6 +154,9 @@ func main() {
 			img = tt.Image()
 		}
 		name := p.name
+		if p.page == app.PageToolchains && *managers {
+			name = "toolchains-managers"
+		}
 		if p.page == app.PageDownloads && *vendorDlg {
 			name = "downloads-vendor"
 		}
@@ -316,7 +326,7 @@ func seedProjects(svc *core.Service) error {
 		return err
 	}
 	demo := map[string]map[string]string{
-		"orbit-web":   {".nvmrc": "24.13.0\n", ".python-version": "3.12.4\n"},
+		"orbit-web":   {".nvmrc": "24.13.0\n", ".python-version": "3.12.4\n", "main.ts": "import { createApp } from 'vue'\nimport App from './App.vue'\n\ncreateApp(App).mount('#app')\n", "App.vue": "<script setup lang=\"ts\">\nconst title = 'Orbit'\n</script>\n\n<template>\n  <main>{{ title }}</main>\n</template>\n", "app.css": "body {\n  margin: 0;\n  font-family: system-ui;\n}\n", "tasks.py": "def health():\n    return {'status': 'ok'}\n"},
 		"ledger-api":  {"go.mod": "module ledger\n\ngo 1.24\ntoolchain go1.25.6\n", ".java-version": "21.0.4\n"},
 		"atlas-ml":    {".python-version": "3.11.9\n", "rust-toolchain.toml": "[toolchain]\nchannel = \"1.98.0\"\n"},
 		"studio-app":  {".nvmrc": "18.16.0\n", ".ruby-version": "3.3.6\n"},
@@ -374,8 +384,15 @@ func seedDemoRepos(home string, svc *core.Service) {
 	orbit := filepath.Join(home, "code", "orbit-web")
 	if runGitIn(orbit, "init") == nil {
 		_ = runGitIn(orbit, "remote", "add", "origin", "git@github.com:orbit-labs/orbit-web.git")
+		_ = runGitIn(orbit, "remote", "add", "gitee", "git@gitee.com:orbit-labs/orbit-web.git")
+		_ = runGitIn(orbit, "remote", "add", "gitea", "https://git.example.dev/orbit-labs/orbit-web.git")
 		_ = runGitIn(orbit, "add", "-A")
 		_ = runGitIn(orbit, "commit", "-m", "init")
+		_ = runGitIn(orbit, "branch", "develop")
+		_ = runGitIn(orbit, "branch", "feature/theme")
+		_ = runGitIn(orbit, "update-ref", "refs/remotes/origin/main", "HEAD")
+		_ = runGitIn(orbit, "update-ref", "refs/remotes/gitee/main", "HEAD")
+		_ = runGitIn(orbit, "update-ref", "refs/remotes/gitea/main", "HEAD")
 		// A committed file, changed afterwards.
 		_ = os.WriteFile(filepath.Join(orbit, ".nvmrc"), []byte("24.13.0\n# bumped\n"), 0o644)
 		// A file that has never been added.
@@ -400,6 +417,8 @@ func seedDemoRepos(home string, svc *core.Service) {
 	// addresses.
 	for _, p := range []core.GitProfile{
 		{Key: "github.com/orbit-labs", Label: "Orbit Labs 组织", Name: "Orbit Labs", Email: "dev@orbitlabs.example"},
+		{Key: "github.com/orbit-labs", Label: "个人身份", Name: "Ada Lovelace", Email: "ada@example.dev"},
+		{Key: "gitee.com/orbit-labs", Label: "Gitee 团队", Name: "Orbit Team", Email: "team@orbitlabs.example"},
 		{Key: "github.com/ledger-team/ledger-api", Label: "记账项目", Name: "Ledger Bot", Email: "bot@ledger.test"},
 	} {
 		if err := svc.SaveGitProfile(p); err != nil {

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -19,11 +20,14 @@ type Service struct {
 	store   *Store
 	catalog *Catalog
 
-	mu        sync.Mutex
-	installed []Installed
-	scanned   time.Time
-	managers  []ManagerState
-	changed   []func()
+	mu         sync.Mutex
+	installed  []Installed
+	scanned    time.Time
+	managers   []ManagerState
+	changed    []func()
+	gitChanged []func()
+	// gitLoad may be replaced by tests; nil uses the production loader.
+	gitLoad func(string) GitInfo
 	// gitCache holds the last read of each directory's repository, because the
 	// window asks on every frame and running git that often would show up as
 	// stutter while a repository is large.
@@ -53,6 +57,7 @@ func NewService() (*Service, error) {
 		store: store, catalog: NewCatalog(),
 		gitCache:   map[string]gitCacheEntry{},
 		gitLoading: map[string]bool{},
+		gitLoad:    loadGitForService,
 	}
 	s.Refresh()
 	return s, nil
@@ -120,10 +125,17 @@ func loadGitForService(dir string) GitInfo {
 	return LoadGitIn(dir, gitEnv{rulesDir: GitConfigDir(), globalPath: GlobalGitConfig()})
 }
 
+func (s *Service) loadGit(dir string) GitInfo {
+	if s.gitLoad != nil {
+		return s.gitLoad(dir)
+	}
+	return loadGitForService(dir)
+}
+
 // reloadGit runs git now and stores the answer.
 func (s *Service) reloadGit(dir string) GitInfo {
 	s.setGitLoading(dir, true)
-	info := loadGitForService(dir)
+	info := s.loadGit(dir)
 	s.mu.Lock()
 	if s.gitCache == nil {
 		s.gitCache = map[string]gitCacheEntry{}
@@ -137,9 +149,18 @@ func (s *Service) reloadGit(dir string) GitInfo {
 // refreshGitLater re-reads a directory in the background, unless a read is
 // already running for it.
 func (s *Service) refreshGitLater(dir string) {
-	s.setGitLoading(dir, true)
+	s.mu.Lock()
+	if s.gitLoading[dir] {
+		s.mu.Unlock()
+		return
+	}
+	if s.gitLoading == nil {
+		s.gitLoading = map[string]bool{}
+	}
+	s.gitLoading[dir] = true
+	s.mu.Unlock()
 	go func() {
-		info := loadGitForService(dir)
+		info := s.loadGit(dir)
 		s.mu.Lock()
 		if s.gitCache == nil {
 			s.gitCache = map[string]gitCacheEntry{}
@@ -147,7 +168,7 @@ func (s *Service) refreshGitLater(dir string) {
 		s.gitCache[dir] = gitCacheEntry{info: info, at: time.Now()}
 		delete(s.gitLoading, dir)
 		s.mu.Unlock()
-		s.Notify()
+		s.notifyGitChanged()
 	}()
 }
 
@@ -170,7 +191,7 @@ func (s *Service) RefreshGit(dir string) {
 	if dir == "" {
 		return
 	}
-	s.InvalidateGit(dir)
+	// Keep the last result available while the replacement is being read.
 	s.refreshGitLater(dir)
 }
 
@@ -209,14 +230,74 @@ func (s *Service) SetGitIdentity(dir, name, email string) error {
 	return nil
 }
 
+// SetGitRemote adds a destination or updates its fetch URL. Explicit push URLs
+// remain separate, following git remote set-url's behavior.
+func (s *Service) SetGitRemote(dir, name, url string) error {
+	name, url = strings.TrimSpace(name), strings.TrimSpace(url)
+	if err := validateGitRemote(dir, name); err != nil {
+		return err
+	}
+	if url == "" || strings.ContainsAny(url, "\x00\r\n") {
+		return errors.New("远端地址不能为空或包含换行")
+	}
+	// --get-url expands URL rewrite rules without connecting to the remote.
+	if _, err := runGit(dir, "ls-remote", "--get-url", "--", url); err != nil {
+		return fmt.Errorf("远端地址无效: %w", err)
+	}
+	command := "add"
+	if remotes, err := runGit(dir, "remote"); err != nil {
+		return fmt.Errorf("读取远端失败: %w", err)
+	} else {
+		for _, existing := range strings.Split(remotes, "\n") {
+			if strings.TrimSpace(existing) == name {
+				command = "set-url"
+				break
+			}
+		}
+	}
+	if _, err := runGit(dir, "remote", command, "--", name, url); err != nil {
+		return fmt.Errorf("保存远端失败: %w", err)
+	}
+	s.reloadGit(dir)
+	s.Notify()
+	return nil
+}
+
+func validateGitRemote(dir, name string) error {
+	if name == "" || strings.HasPrefix(name, "-") {
+		return errors.New("远端名称无效")
+	}
+	if _, err := runGit(dir, "check-ref-format", "refs/remotes/"+name); err != nil {
+		return fmt.Errorf("远端名称无效: %w", err)
+	}
+	return nil
+}
+
+// RemoveGitRemote removes a named destination using Git's own config handling.
+func (s *Service) RemoveGitRemote(dir, name string) error {
+	name = strings.TrimSpace(name)
+	if err := validateGitRemote(dir, name); err != nil {
+		return err
+	}
+	if _, err := runGit(dir, "remote", "remove", "--", name); err != nil {
+		return fmt.Errorf("删除远端失败: %w", err)
+	}
+	if err := clearGitRemoteSelection(dir, name); err != nil {
+		return err
+	}
+	s.reloadGit(dir)
+	s.Notify()
+	return nil
+}
+
 // Store exposes the store for the settings page.
 func (s *Service) Store() *Store { return s.store }
 
 // GitProfiles returns the remote-address bindings, sorted by key.
 func (s *Service) GitProfiles() []GitProfile { return s.store.GitProfileList() }
 
-// SaveGitProfile adds or replaces the binding for a remote address, and installs
-// the rules so git starts honouring it.
+// SaveGitProfile updates an exact ID, or upserts a name/email pair at one
+// normalized address. Global rules remain opt-in.
 func (s *Service) SaveGitProfile(p GitProfile) error {
 	p.Key = strings.TrimSpace(p.Key)
 	p.Name = strings.TrimSpace(p.Name)
@@ -227,26 +308,45 @@ func (s *Service) SaveGitProfile(p GitProfile) error {
 	if p.Name == "" || p.Email == "" {
 		return errors.New("用户名和邮箱都要填")
 	}
-	if !p.Valid() {
+	key, ok := NormalizeRemote(p.Key)
+	if !ok {
 		return errors.New("远端地址看起来不是有效的地址")
 	}
+	p.Key = key
 	err := s.store.Update(func(st *Store) {
-		for i := range st.GitProfiles {
-			if strings.EqualFold(st.GitProfiles[i].Key, p.Key) {
-				p.Added = st.GitProfiles[i].Added
+		normalizeGitProfileActives(st.GitProfiles)
+		for i, existing := range st.GitProfiles {
+			match := p.ID != "" && existing.IdentityID() == p.ID
+			if p.ID == "" {
+				match = strings.EqualFold(existing.Key, p.Key) && existing.Name == p.Name && existing.Email == p.Email
+			}
+			if match {
+				p.ID = existing.IdentityID()
+				p.Added = existing.Added
+				p.Active = existing.Active
+				// Moving an identity to an existing key preserves that key's selection.
+				if !strings.EqualFold(existing.Key, p.Key) {
+					p.Active = false
+				}
 				st.GitProfiles[i] = p
+				normalizeGitProfileActives(st.GitProfiles)
 				return
 			}
 		}
 		if p.Added.IsZero() {
 			p.Added = time.Now()
 		}
+		if p.ID == "" {
+			p.ID = "git-" + rand.Text()
+		}
+		p.Active = false
 		st.GitProfiles = append(st.GitProfiles, p)
+		normalizeGitProfileActives(st.GitProfiles)
 	})
 	if err != nil {
 		return err
 	}
-	if err := s.installGitRules(); err != nil {
+	if err := s.refreshInstalledGitRules(); err != nil {
 		return err
 	}
 	s.invalidateAllGit()
@@ -254,34 +354,95 @@ func (s *Service) SaveGitProfile(p GitProfile) error {
 	return nil
 }
 
-// DeleteGitProfile removes a binding and its rule.
-func (s *Service) DeleteGitProfile(key string) error {
-	removed := false
+// DeleteGitProfile removes an exact identity ID. A legacy address selector
+// removes every identity at that key.
+func (s *Service) DeleteGitProfile(selector string) error {
+	removedKeys := map[string]bool{}
 	err := s.store.Update(func(st *Store) {
+		byID := false
+		for _, p := range st.GitProfiles {
+			if p.IdentityID() == selector {
+				byID = true
+				break
+			}
+		}
 		kept := st.GitProfiles[:0]
 		for _, p := range st.GitProfiles {
-			if strings.EqualFold(p.Key, key) {
-				removed = true
+			if byID && p.IdentityID() == selector || !byID && strings.EqualFold(p.Key, selector) {
+				removedKeys[p.Key] = true
 				continue
 			}
 			kept = append(kept, p)
 		}
 		st.GitProfiles = kept
+		normalizeGitProfileActives(st.GitProfiles)
 	})
 	if err != nil {
 		return err
 	}
-	if !removed {
+	if len(removedKeys) == 0 {
 		return nil
 	}
-	if err := s.installGitRules(); err != nil {
+	if err := s.refreshInstalledGitRules(); err != nil {
 		return err
 	}
-	// The rule file itself is inert now; remove it so a later profile with the
-	// same key cannot inherit a stale identity.
-	_ = os.Remove(ProfileFile(key))
+	for _, p := range s.GitProfiles() {
+		for key := range removedKeys {
+			if strings.EqualFold(key, p.Key) {
+				delete(removedKeys, key)
+			}
+		}
+	}
+	for key := range removedKeys {
+		_ = os.Remove(ProfileFile(key))
+	}
 	s.invalidateAllGit()
 	s.Notify()
+	return nil
+}
+
+// SelectGitProfile explicitly switches this repository's commit identity and
+// the active global rule identity for the same address. It installs no rules.
+func (s *Service) SelectGitProfile(dir, id string) error {
+	var selected *GitProfile
+	for _, p := range s.GitProfiles() {
+		if p.IdentityID() == id {
+			copy := p
+			selected = &copy
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("未找到 Git 身份")
+	}
+	if !selected.Valid() {
+		return errors.New("这条绑定缺少用户名或邮箱")
+	}
+	if err := WriteGitIdentity(dir, selected.Name, selected.Email); err != nil {
+		return err
+	}
+	if err := s.store.Update(func(st *Store) {
+		for i := range st.GitProfiles {
+			if strings.EqualFold(st.GitProfiles[i].Key, selected.Key) {
+				st.GitProfiles[i].Active = st.GitProfiles[i].IdentityID() == id
+			}
+		}
+	}); err != nil {
+		return err
+	}
+	if err := s.refreshInstalledGitRules(); err != nil {
+		return err
+	}
+	s.invalidateAllGit()
+	s.reloadGit(dir)
+	s.Notify()
+	return nil
+}
+
+func (s *Service) refreshInstalledGitRules() error {
+	if GitRulesInstalled() {
+		return s.installGitRules()
+	}
 	return nil
 }
 
@@ -361,6 +522,23 @@ func (s *Service) OnChange(fn func()) {
 	s.mu.Unlock()
 }
 
+// OnGitChange registers a repaint listener for background repository reads.
+// These reads do not change SDK discovery or project resolution.
+func (s *Service) OnGitChange(fn func()) {
+	s.mu.Lock()
+	s.gitChanged = append(s.gitChanged, fn)
+	s.mu.Unlock()
+}
+
+func (s *Service) notifyGitChanged() {
+	s.mu.Lock()
+	listeners := append([]func(){}, s.gitChanged...)
+	s.mu.Unlock()
+	for _, fn := range listeners {
+		fn()
+	}
+}
+
 // Notify tells every listener that something changed.
 func (s *Service) Notify() {
 	s.mu.Lock()
@@ -385,13 +563,21 @@ func (s *Service) Refresh() []Installed {
 	return list
 }
 
+// CachedInstalled returns a copy without discovery, even when the cache is old.
+// UI notification consumers must not turn a state read into another scan.
+func (s *Service) CachedInstalled() []Installed {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Installed(nil), s.installed...)
+}
+
 // Installed returns the last discovery result, discovering first when it is
 // older than a minute.
 func (s *Service) Installed() []Installed {
 	s.mu.Lock()
 	list, at := s.installed, s.scanned
 	s.mu.Unlock()
-	if list == nil || time.Since(at) > time.Minute {
+	if at.IsZero() || time.Since(at) > time.Minute {
 		return s.Refresh()
 	}
 	return list

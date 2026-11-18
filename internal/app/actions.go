@@ -25,6 +25,7 @@ func (a *App) recompute() {
 	}
 	a.resolutions = res
 	a.report = core.Diagnose(a.svc)
+	a.doctor = buildDoctorView(a.report)
 	if len(a.pinBuf) != len(core.Kinds) {
 		a.pinBuf = make([]string, len(core.Kinds))
 	}
@@ -85,7 +86,7 @@ func (a *App) visibleRemote(kind core.Kind) []core.Remote {
 
 // isInstalled reports whether a remote version is already here.
 func (a *App) isInstalled(r core.Remote) bool {
-	_, ok := core.Exact(a.installed, r.Kind, r.Version)
+	_, ok := a.inventory.exact(r.Kind, r.Version)
 	return ok
 }
 
@@ -206,6 +207,7 @@ func (a *App) loadRemote(kind core.Kind, force bool) {
 	}
 	go func() {
 		list, err := a.svc.ListRemote(context.Background(), kind, force)
+		grouped := buildRemoteGroupedView(kind, list)
 		finish := func() {
 			a.remoteLoading = false
 			a.remoteKind = kind
@@ -217,7 +219,7 @@ func (a *App) loadRemote(kind core.Kind, force bool) {
 			}
 			a.remoteErr = ""
 			a.remote = list
-			a.cacheRemote(kind, list)
+			a.cacheRemoteView(kind, list, grouped)
 			a.remoteList = ui.ListState{}
 		}
 		if a.win == nil {
@@ -230,6 +232,10 @@ func (a *App) loadRemote(kind core.Kind, force bool) {
 
 // cacheRemote remembers one SDK's list for the next visit to its tab.
 func (a *App) cacheRemote(kind core.Kind, list []core.Remote) {
+	a.cacheRemoteView(kind, list, buildRemoteGroupedView(kind, list))
+}
+
+func (a *App) cacheRemoteView(kind core.Kind, list []core.Remote, grouped remoteGroupedView) {
 	if len(list) == 0 {
 		return
 	}
@@ -237,6 +243,10 @@ func (a *App) cacheRemote(kind core.Kind, list []core.Remote) {
 		a.remoteCache = map[core.Kind][]core.Remote{}
 	}
 	a.remoteCache[kind] = list
+	if a.remoteGroups == nil {
+		a.remoteGroups = make(map[core.Kind]remoteGroupedView)
+	}
+	a.remoteGroups[kind] = grouped
 }
 
 // startInstall downloads and unpacks one version in the background.
@@ -534,7 +544,7 @@ func (a *App) saveAddVersion() {
 				return
 			}
 			a.addOpen = false
-			a.toolchainKind = kindIndexOf(kind)
+			a.SetToolchainKind(kind)
 			a.pushToast("已添加 " + core.Info(inst.Kind).Name + " " + inst.Version)
 			a.syncAndRecompute()
 		})
@@ -550,6 +560,9 @@ func (a *App) dialogs(c *ui.Context) {
 
 	a.vendorPicker(c)
 	a.gitBindDialog(c)
+	a.gitRemoteDialog(c)
+	a.gitBranchDialogs(c)
+	a.gitProfilesDialog(c)
 
 	if inst := a.confirmRemove; inst != nil {
 		open := true

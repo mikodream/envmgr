@@ -29,7 +29,7 @@ EnvMgr 的做法：
 | --- | --- |
 | 概览 | 项目数、已装版本数、待处理缺失版本、最近项目、各 SDK 最新版本 |
 | 项目 | 左侧项目列表（可搜索），右侧按 SDK 选版本；卡片上显示每个项目的提交地址（有名字显示名字，没名字显示域名）；Git 卡显示仓库状态、提交身份与远端地址绑定 |
-| 工具链 | 本机所有已装版本及其来源（envmgr / nvm / fnm / pyenv / jenv / sdkman / rustup / PATH…）；版本管理器一键安装 |
+| 工具链 | 「已装 SDK」按语言查看版本及来源；「版本管理器」独立集中展示管理工具及安装入口 |
 | 下载安装 | 从官方源列版本、下载、校验、安装；Java 多来源可选；LTS 过滤；内联进度 |
 | 设置 | 主题（跟随系统/浅色/深色）、跟随项目文件开关、SDK 安装目录、Node 镜像、shell 钩子片段、Git 地址绑定管理 |
 
@@ -86,7 +86,11 @@ IBM Semeru 与 Oracle 的 OpenJDK 构建没有稳定的公开版本索引（Seme
 
 ### 项目里的 Git
 
-SDK 版本对了，下一个岔子通常是 git：`git commit` 报 `Please tell me who you are`，或者在别人的机器上提交出一个不属于这个项目的邮箱。所以项目页里有一张 Git 卡，只回答两件事 —— 这个目录是不是仓库，下一次提交会署谁的名。
+项目页的 Git 卡按「远程仓库 → 分支与改动 → 提交身份 → 项目代码统计」排列。远端下拉以别名为名称、仓库 URL 为值；选择后保存为本仓库的默认推送目标。分支下拉包含所有本地分支及所选远端已经获取的分支，支持切换、新建并切换、删除已合并的非当前本地分支；「获取分支」才会连接所选服务器更新引用，普通刷新和页面绘制只读取本地数据。
+
+分支操作由 Git 检查未提交改动、名称冲突和合并状态，不执行强制切换或强制删除。改动数据来自当前本地工作区，领先/落后来自本地缓存的 upstream 引用；切换不同远端不会把同一工作区伪装成不同的文件改动。
+
+代码统计在后台执行，可单独重新统计，展示源文件数、非空行、空白行、体积和语言分布。非空行包含注释，文档与配置不计作源代码；Git 仓库使用跟踪与未忽略文件列表，排除依赖、构建目录和符号链接。扫描有文件大小、数量、读取量与时间上限，达到上限或发生读取错误时显示部分结果。切换项目会取消过期任务，分支操作后自动更新统计。
 
 | 状态 | 卡片长什么样 |
 | --- | --- |
@@ -116,9 +120,9 @@ SDK 版本对了，下一个岔子通常是 git：`git commit` 报 `Please tell 
 - **分支名用 `symbolic-ref --short HEAD` 读，不用 `rev-parse --abbrev-ref HEAD`**。后者在刚 `git init`、一次提交都还没有时返回 `HEAD`，会被误判成游离头指针。实测确认过：新建仓库的 `symbolic-ref` 给出 `master`，`abbrev-ref` 给出 `HEAD`。
 - **`git status --porcelain` 的输出不能 `TrimSpace`**。它的第一列是暂存区状态，`" M file"`（已修改）前面那个空格是数据；统一 trim 掉就变成 `"M file"`（已暂存），计数全错。这个 bug 是真 git 测试抓出来的，不是想出来的。
 
-`git status` 在大型仓库上要花上百毫秒，所以读结果带缓存：第一次读同步取（页面的首帧就要正确），之后过期先返回旧值、后台再读一遍，绘制线程从不等待 git。「刷新」按钮走的是后台读。
+`git status` 在大型仓库上可能很慢，项目页绘制只读取缓存：首次显示「读取中」并在后台加载，之后过期先显示旧值、后台更新。「刷新」按钮保留旧缓存，并与已有读取合并。Git 读取完成只触发重绘，不触发 SDK 扫描；普通状态通知合并为后台快照更新，主动刷新才执行全量 SDK 扫描，避免「扫描结束通知 → 再扫描」的反馈循环。
 
-命令行同一份能力：
+命令行状态与身份操作：
 
 ```bash
 envmgr git                          # 当前目录的仓库状态与提交身份
@@ -129,72 +133,40 @@ envmgr git set --name 张三 --email z@ex.com --dir <目录>
 envmgr git set --clear --dir <目录>  # 删掉本项目设置，回到全局
 ```
 
-### 按远端地址绑定身份
+### 多个远端地址与多套身份
 
-同一个人的名字和邮箱往往不止一套：公司组织下要署工号邮箱，自己的仓库要署私人邮箱。逐个仓库 `git set` 记不住也容易漏，所以 EnvMgr 允许把一套身份**绑定到一个远端地址**上，地址就是 key。
+一个项目可以同时保存 GitHub、Gitee、Gitea 等多个远端，每个地址又可以保存多套用户名和邮箱。Git 卡顶部选择远端，提交身份区域的「身份库」管理对应地址的资料。
 
-地址会被归一化：去掉协议、凭据、端口和结尾的 `.git`，主机小写。所以 `git@github.com:acme/app.git`、`https://github.com/acme/app`、`ssh://git@github.com:2222/acme/app.git` 是同一个 key `github.com/acme/app`。地址可以写到一个组织或一个人，也可以写到单个仓库，**越具体越优先**：
+1. 点「添加地址」，填写远端别名和 URL，例如 `github`、`gitee`、`company`。顶部下拉显示别名和地址，已有地址可以编辑或移除。
+2. 在下拉中选择地址后，点「身份库」查看它对应的身份。点「为此地址新增身份」保存另一套用户名和邮箱，原身份继续保留。
+3. 点「应用」，把选中的用户名和邮箱写入当前仓库的本地 Git 配置；提交身份区域显示实际生效的值。
+4. 点「编辑」只修改这一套身份；设置页删除身份也只删除所选的一套。同一地址的其他身份保持可用。
 
-| 绑定 | 命中 | 不命中 |
-| --- | --- | --- |
-| `github.com` | 该主机下所有仓库 | —— |
-| `github.com/acme` | `acme/app`、`acme/team/web` | `other/app` |
-| `github.com/acme/app` | 只有 `acme/app` | `acme/other` |
+地址名称用于区分项目中的远端；身份的显示名用于区分公司、个人等身份。未命名身份仍按地址域名显示。旧版保存的一套地址身份自动兼容，继续显示并可新增其他身份。
 
-<img src="shots/projects.png" alt="项目卡片上显示提交地址">
+**一次 Git 提交只有一套署名。** 选择地址会切换远端上下文并保存本仓库的默认推送目标；需要改变下一次提交的 `user.name` / `user.email` 时，在身份库里点「应用」，或直接修改身份。已有的当前分支推送覆盖项也会指向所选远端，其他分支的覆盖项和 upstream 保留。同一提交推送到不同平台会保留同一署名；历史提交保持原样。远端认证仍由 Git 的凭据或 SSH 配置负责。
 
-项目卡片上直接能看到每个项目的提交地址：**有名字显示名字，没名字显示域名**。绿色的「记账项目」「Orbit Labs 组织」是已经绑定的，灰色的 `gitlab.com` 是没绑定的 —— 一眼就能看出哪些项目还在用默认身份。
+地址会被归一化：去掉协议、凭据、端口和结尾的 `.git`，主机小写。组织级、主机级绑定仍可复用到下属仓库，每条身份都有独立 ID，编辑、应用和删除均可按 ID 精确定位。
 
-点「绑定此地址」填名字、用户名、邮箱：
+<img src="shots/git-orbit-web.png" alt="一个项目多个远端，每个地址多套身份">
 
-<img src="shots/git-orbit-web-bind.png" alt="按远端地址绑定身份">
-
-绑定能自动生效，靠的是 git 自己的 `includeIf "hasconfig:remote.*.url:<glob>"` —— 这是 git 唯一提供的「按远端地址选配置」机制（2.36 起）。EnvMgr 做的是：
-
-1. 每条绑定写一个身份文件到 `~/.envmgr/git/<地址>.gitconfig`；
-2. 在全局 git 配置里写入一段**带标记的块**，里面只有 `includeIf` 指向这些文件；
-3. 原全局配置先备份成 `.envmgr.bak`，块每次保存都整段重建，不会重复堆积。
-
-这里有个取舍要说清楚：**这一步确实会写全局 git 配置**。不是环境变量，也不会改你的 `user.name` —— 只是增加若干 `includeIf`。之所以必须写全局，是因为 git 没有任何仓库级的「按地址选身份」机制，`--local` 只能写死一套。块是带标记的，点「停止自动套用」就整段移除，实测卸载后全局配置逐字节回到原样，你自己手写的 `includeIf` 不受影响。
-
-三种状态的措辞是分开的，因为差别很实际：
-
-| 卡片上写的 | 含义 |
-| --- | --- |
-| 已生效（绿） | 地址有绑定，规则也装了，git 现在就用这套 |
-| 已绑定但规则未安装（黄） | 绑定存着，但 git 还没装上规则，**还不生效** —— 不写这句就是骗人 |
-| 没有绑定 | 地址下没有绑定，提交仍用当前身份 |
-
-身份来源因此多了一级，优先级是：**本项目 `.git/config` > 远端绑定 > 全局**。卡片上分别标「本项目」「远端绑定」「全局」，来源判定用的是 `git config --show-origin`，不是猜的 —— 它直接给出是哪个文件回答的，所以远端绑定和全局继承分得清。
-
-两个坑是真 git 测出来的，不是推的：
-
-- **仓库级 key 必须额外生成带 `.git` 的规则**。key 里 `acme/app` 没有后缀，而 `acme/app/**` 要求路径后面还有斜杠；真实 clone 地址是 `acme/app.git`，`.git` 不是斜杠，于是规则不命中 —— 绑定看起来存了，git 却不理。现在每个地址同时生成 `…/app/**`、`…/app.git` 和 `…/app` 三种，少一种就漏。这个缺口是端到端测试抓出来的（组织级绑定能命中，所以只测组织级看不出来）。
-- **`--global --get` 会把规则的值当成全局值**。仓库命中规则时，`git config --global --get user.name` 返回的是规则里的名字。要拿到「规则不存在时会用什么」，必须 `git config --file <全局配置路径> --get`，绕过条件包含。编辑器的「沿用全局」提示读的是后者。
-
-命令行：
+命令行示例：
 
 ```bash
-envmgr git profile add github.com/acme --label 公司账号 --name 张三 --email z@acme.com
-envmgr git profile add git@github.com:me/dotfiles.git --name 张三 --email me@home.dev
-envmgr git profile list             # 列出所有绑定，带 * 的是起了名字的
-envmgr git profile rm github.com/acme
+envmgr git remote add github https://github.com/acme/app.git --dir <项目目录>
+envmgr git remote add gitee git@gitee.com:acme/app.git --dir <项目目录>
+envmgr git remote list --dir <项目目录>
 
-envmgr git rules status             # 自动套用装了没、git 版本够不够
-envmgr git rules install            # 让 git 按地址自动选择身份
-envmgr git rules uninstall          # 整段移除，全局配置回到原样
+envmgr git profile add github.com/acme --label 公司 --name Work --email work@acme.dev
+envmgr git profile add github.com/acme --label 个人 --name Personal --email me@example.dev
+envmgr git profile list
+envmgr git profile use <身份ID> --dir <项目目录>
+envmgr git profile rm <身份ID>
 ```
 
-<img src="shots/settings.png" alt="设置页里管理所有地址绑定">
+保存身份本身只保存资料。可选的 `envmgr git rules install` 会在全局 Git 配置里增加带标记的条件包含块，为每个地址生成当前选中的默认身份；原文件备份为 `.envmgr.bak`。保存或切换身份会刷新已经安装的规则；未安装规则时保持未安装状态。`envmgr git rules uninstall` 移除这个块。全局环境变量保持原样。
 
-`envmgr git status` 也会显示这一级来源：
-
-```
-远端  git@github.com:acme/app.git
-地址  github.com/acme/app
-用户名  Acme Dev（远端绑定）
-邮箱    dev@acme.test（远端绑定）
-```
+多远端仓库可能同时命中多条 `includeIf`，Git 不会因将来推送到哪个远端而重新选择提交身份。因此项目页的显式「应用此身份」写入本地配置，优先于条件包含和全局默认值，确保当前项目的下一次提交署名明确。
 
 ## 体检
 
@@ -245,9 +217,15 @@ envmgr forget-version java ~/env/java/17 # 取消登记（不删磁盘文件）
 
 `envmgr run` 会把命令解析到**项目固定的那个版本**上（先按覆盖后的 PATH 找可执行文件，再启动），退出码原样返回，可以直接放进脚本。
 
+## 工具链与版本管理器
+
+工具链页顶部有「已装 SDK」和「版本管理器」两个独立入口。前者按 Node.js、Python、Java 等语言查看已装版本及来源；后者集中查看 nvm、fnm、pyenv、mise 等管理工具，保留安装、状态、目录和官网入口，多语言管理器统一显示一次。两份列表分别保存滚动位置，SDK 列表为空时可通过「查看版本管理器」跳转。
+
+<img src="shots/toolchains-managers.png" alt="独立的版本管理器视图">
+
 ## 添加已安装的版本
 
-自动扫描覆盖常规位置，但每个人的机器都有自己的放法。工具链页右上角的 **＋ 添加已安装版本** 用来补这个缺口：
+自动扫描覆盖常规位置，但每个人的机器都有自己的放法。工具链页「已装 SDK」中的 **＋ 添加已安装版本** 用来补这个缺口：
 
 1. 选 SDK 类型
 2. 选目录（原生目录对话框）
@@ -369,8 +347,12 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 
 ## 验证方式
 
+- Git 工作区交互：`go test ./internal/app -run 'GitWorkspace|GitBranchChoices' -count=1` 在临时真 Git 仓库中点击下拉和弹窗，验证远端别名/URL 值、分支过滤、切换、新建、删除、错误保留以及滚轮动画。核心分支测试另覆盖未合并/当前分支删除拒绝、脏工作区冲突、本地 bare 远端获取和 prune、配置隔离；代码统计测试覆盖忽略规则、项目子目录范围、行数、预算和取消。
+- 页面滚动回归：`go test ./internal/app -run 'OtherPages|SettingsWheel|ProjectPagesHandleRepeatedWheel|GroupedFeed' -count=1` 使用真实滚轮事件推进平滑动画，覆盖概览、项目、工具链、下载安装、体检、设置。大列表样本包含 1,000 个已装版本、5,000 个下载条目与 600 项体检结果，验证双向滚动、动画结束和可见行数量；同时检查设置页只使用缓存状态、版本源刷新和 LTS 切换不会沿用过期缓存。
+- 绘制路径不执行环境探测：设置页的 Git 能力、自动套用状态和 shell 钩子状态由后台快照提供；工具链排序和体检排序在快照更新时完成，下载源分组在数据到达时计算。工具链、下载和体检使用虚拟列表，仅构建可见行；设置页进入时异步更新检测结果，安装或移除钩子后也会更新快照。
 - `go test ./internal/core/` —— 版本比较与匹配、标记文件解析、PATH 覆盖与去重、zip-slip 防护、解包展平、项目内 pin 优先于标记文件、`LookPath` 优先使用覆盖后的 PATH。
 - `go test ./internal/core/` 里还有一组**真 git** 测试：临时仓库里跑 `git init`、写项目级 `user.name`/`user.email`、读回来、清空再确认回退到全局；用 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` 指向临时文件，绝不读写本机真实的 `~/.gitconfig`。
+- 控件几何回归：`go test ./internal/app -run 'SelectChevron|IconButtonGlyph|PinPickerKeeps' -count=1` 把渲染出的位图按触发条区域取墨迹包围盒，断言下拉箭头垂直居中于触发条（误差 ≤1.5 DIP）、右端距边缘 10–14 DIP、尺寸不超过 16×16，以及只有图标的按钮（打开目录、打开官网、复制路径、删除）里图标居中于 28×28 按钮（误差 ≤1 DIP）。换回旧的 `⌄` 字形箭头会让箭头中心比触发条低 4.9 DIP，换回带文字内边距的图标按钮会得到 30×28 而不是正方形，两种情况测试都会失败。
 - `go vet ./...`、`gofmt -l` 干净。
 - 五个平台目标 `CGO_ENABLED=0` 交叉编译通过。
 - 离线渲染：`go run ./cmd/snap -out shots` 用 `ui.Render` 把每个页面渲染成 PNG（浅色/深色），不打开窗口即可检查版式；`-project-name <名字>` 可以指定项目，`-git-edit` 展开身份编辑器，`-git-bind` 打开地址绑定对话框。
@@ -401,4 +383,4 @@ _notes          mygo API 备忘（编译验证过的速查表）
 - **管理器只装官方发行版**：`n`、`volta`、`mise` 这类通过 npm/脚本自举的，给出官方命令和链接，不代替你执行。
 - **Git 身份默认只写仓库级**：`user.name`/`user.email` 一律用 `git config --local` 写进项目自己的 `.git/config`。要按远端地址自动选身份时，才在全局 git 配置里加一段带标记的 `includeIf` 块 —— 这是 git 唯一支持的机制，没有仓库级的等价物；块可整段移除，原文件留 `.envmgr.bak` 备份，你自己的 `user.name` 一个字不动。
 - **地址绑定用地址当 key，不用项目名**：项目会改名、会被删掉重新 clone，远端地址才是稳定且可推导的那个东西。名字（`--label`）只是给人看的显示层，不参与匹配。
-- **Git 命令不阻塞绘制**：读结果带缓存，首次同步取，之后过期先返回旧值、后台刷新。`git status` 在大仓库上慢，卡在绘制线程里就是肉眼可见的卡顿。
+- **Git 命令不阻塞绘制**：首次读取和过期刷新都在后台，同一目录只保留一个读取任务。滚轮动画帧只读取缓存，Git 通知只要求重绘；SDK 扫描和体检不会因 Git 通知在主线程上反复执行。

@@ -34,6 +34,8 @@ const (
 
 	svgSearch = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l4.5 4.5"/></svg>`
 
+	svgChevronDown = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`
+
 	svgChevron = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 6l6 6-6 6"/></svg>`
 
 	svgSun = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>`
@@ -57,27 +59,28 @@ const (
 // Icon handles, parsed once: parsing SVG inside a view would cost every
 // frame.
 var (
-	icLogo     = ui.MustParseSVG([]byte(svgLogo))
-	icGauge    = ui.MustParseSVG([]byte(svgGauge))
-	icFolder   = ui.MustParseSVG([]byte(svgFolder))
-	icLayers   = ui.MustParseSVG([]byte(svgLayers))
-	icDownload = ui.MustParseSVG([]byte(svgDownload))
-	icSettings = ui.MustParseSVG([]byte(svgSettings))
-	icRefresh  = ui.MustParseSVG([]byte(svgRefresh))
-	icPlus     = ui.MustParseSVG([]byte(svgPlus))
-	icTerminal = ui.MustParseSVG([]byte(svgTerminal))
-	icTrash    = ui.MustParseSVG([]byte(svgTrash))
-	icExternal = ui.MustParseSVG([]byte(svgExternal))
-	icCheck    = ui.MustParseSVG([]byte(svgCheck))
-	icAlert    = ui.MustParseSVG([]byte(svgAlert))
-	icSearch   = ui.MustParseSVG([]byte(svgSearch))
-	icChevron  = ui.MustParseSVG([]byte(svgChevron))
-	icSun      = ui.MustParseSVG([]byte(svgSun))
-	icMoon     = ui.MustParseSVG([]byte(svgMoon))
-	icBox      = ui.MustParseSVG([]byte(svgBox))
-	icPlug     = ui.MustParseSVG([]byte(svgPlug))
-	icBranch   = ui.MustParseSVG([]byte(svgBranch))
-	icEdit     = ui.MustParseSVG([]byte(svgEdit))
-	icInfo     = ui.MustParseSVG([]byte(svgInfo))
-	icCopy     = ui.MustParseSVG([]byte(svgCopy))
+	icLogo        = ui.MustParseSVG([]byte(svgLogo))
+	icGauge       = ui.MustParseSVG([]byte(svgGauge))
+	icFolder      = ui.MustParseSVG([]byte(svgFolder))
+	icLayers      = ui.MustParseSVG([]byte(svgLayers))
+	icDownload    = ui.MustParseSVG([]byte(svgDownload))
+	icSettings    = ui.MustParseSVG([]byte(svgSettings))
+	icRefresh     = ui.MustParseSVG([]byte(svgRefresh))
+	icPlus        = ui.MustParseSVG([]byte(svgPlus))
+	icTerminal    = ui.MustParseSVG([]byte(svgTerminal))
+	icTrash       = ui.MustParseSVG([]byte(svgTrash))
+	icExternal    = ui.MustParseSVG([]byte(svgExternal))
+	icCheck       = ui.MustParseSVG([]byte(svgCheck))
+	icAlert       = ui.MustParseSVG([]byte(svgAlert))
+	icSearch      = ui.MustParseSVG([]byte(svgSearch))
+	icChevron     = ui.MustParseSVG([]byte(svgChevron))
+	icChevronDown = ui.MustParseSVG([]byte(svgChevronDown))
+	icSun         = ui.MustParseSVG([]byte(svgSun))
+	icMoon        = ui.MustParseSVG([]byte(svgMoon))
+	icBox         = ui.MustParseSVG([]byte(svgBox))
+	icPlug        = ui.MustParseSVG([]byte(svgPlug))
+	icBranch      = ui.MustParseSVG([]byte(svgBranch))
+	icEdit        = ui.MustParseSVG([]byte(svgEdit))
+	icInfo        = ui.MustParseSVG([]byte(svgInfo))
+	icCopy        = ui.MustParseSVG([]byte(svgCopy))
 )

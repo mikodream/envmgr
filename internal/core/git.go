@@ -47,6 +47,13 @@ type GitIdentity struct {
 // Complete reports whether a commit would have both fields.
 func (i GitIdentity) Complete() bool { return i.Name != "" && i.Email != "" }
 
+// GitRemote describes a named fetch and push destination.
+type GitRemote struct {
+	Name    string
+	URL     string
+	PushURL string
+}
+
 // GitInfo is everything the project page shows about a directory's repository.
 type GitInfo struct {
 	// Available is false when the git program itself is missing.
@@ -61,8 +68,12 @@ type GitInfo struct {
 	Detached bool
 	// Commits is false for a repository that has no commit yet, which is the
 	// normal state right after `git init`.
-	Commits bool
-	Remote  string
+	Commits  bool
+	Remote   string
+	Remotes  []GitRemote
+	Branches []GitBranch
+	// PushRemote is the effective selected push remote (including a branch override).
+	PushRemote string
 	// Commit counts for the status line.
 	Modified  int
 	Staged    int
@@ -154,7 +165,28 @@ func loadGit(dir string, run gitRunner, lookPath func(string) (string, error), e
 	if _, err := run(dir, "rev-parse", "--verify", "--quiet", "HEAD"); err == nil {
 		info.Commits = true
 	}
+	// Preserve the legacy origin value even when enumeration fails.
 	info.Remote = firstLine(mustRun(run, dir, "config", "--get", "remote.origin.url"))
+	for _, line := range strings.Split(mustRun(run, dir, "remote"), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		remote := GitRemote{
+			Name:    name,
+			URL:     firstLine(mustRun(run, dir, "remote", "get-url", "--", name)),
+			PushURL: firstLine(mustRun(run, dir, "remote", "get-url", "--push", "--", name)),
+		}
+		info.Remotes = append(info.Remotes, remote)
+		if name == "origin" && remote.URL != "" {
+			info.Remote = remote.URL
+		}
+	}
+	if info.Remote == "" && len(info.Remotes) > 0 {
+		info.Remote = info.Remotes[0].URL
+	}
+	info.Branches = readGitBranches(run, dir, info)
+	info.PushRemote = readGitPushRemote(run, dir, info)
 	// The porcelain output is parsed as-is: its first column is the index
 	// state, and trimming would shift every line one character left.
 	info.Staged, info.Modified, info.Untracked = countPorcelain(mustRun(run, dir, "status", "--porcelain"))

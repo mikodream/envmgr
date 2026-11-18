@@ -352,7 +352,8 @@ func (s *Store) GitProfileList() []GitProfile {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := append([]GitProfile(nil), s.GitProfiles...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	// Preserve insertion order within a key: it defines the legacy first identity.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
 
