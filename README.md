@@ -84,6 +84,14 @@ IBM Semeru 与 Oracle 的 OpenJDK 构建没有稳定的公开版本索引（Seme
 - 三栏卡片，一张卡一个 SDK —— 颜色点、来源（`pin` / `.nvmrc` / `go.mod` 等）、当前解析到的版本与来源管理器、切换下拉。
 - 这个项目**没用到的** SDK 收在「未配置 N」后面，默认折叠；点「展开」才显示，并且用淡色画出来 —— 它们在本机可用，只是这个项目不关心。
 
+### 任意子目录都算这个项目
+
+版本声明按目录向上查找：在 `src/`、`internal/api/` 里打开终端，用的是最近的项目根（`.envmgr.json`、`.nvmrc`、`.python-version`、`go.mod` 等）声明的版本，和 nvm / pyenv 的行为一致。子目录自己带声明时以子目录为准 —— 一个仓库里可以同时有 Node 18 的前端和 Node 22 的工具链。
+
+缺失的版本不再让整个环境失效。项目要 Go 1.27.4 和 Java 21.0.9，而只有 Java 装好时，进入目录会切到 Java，并把「缺少 Go 1.27.4」打印在终端；`envmgr run`、终端按钮和一键就绪仍然严格，缺任何一个版本都拒绝启动，避免悄悄用到系统里的另一个版本。
+
+进入项目时读取的是最近一次扫描的快照（`~/.envmgr/discovery.json`，60 秒内有效），所以每次 `cd` 不再重新探测所有 SDK：首次约 200ms，之后通常在 10ms 内。超过 60 秒会重新扫描一次，外部工具刚装的版本也能被看到。
+
 ### 项目里的 Git
 
 项目页的 Git 卡按「远程仓库 → 分支与改动 → 提交身份 → 项目代码统计」排列。远端下拉以别名为名称、仓库 URL 为值；选择后保存为本仓库的默认推送目标。分支下拉包含所有本地分支及所选远端已经获取的分支，支持切换、新建并切换、删除已合并的非当前本地分支；「获取分支」才会连接所选服务器更新引用，普通刷新和页面绘制只读取本地数据。
@@ -204,6 +212,7 @@ envmgr list                              # 本机已装
 envmgr list --remote node                # 官方源可装的版本
 envmgr install python@3.12.4             # 下载并安装
 envmgr remove node@20.11.1               # 删除 EnvMgr 装的版本
+envmgr remove node@20.11.1 --force       # 项目仍在用这个版本时也删除
 envmgr doctor                            # 每个项目要的版本是否都在本机
 envmgr hook bash                         # 打印可选安装的 shell 钩子
 envmgr git                               # 当前目录的仓库状态与提交身份
@@ -216,6 +225,16 @@ envmgr forget-version java ~/env/java/17 # 取消登记（不删磁盘文件）
 ```
 
 `envmgr run` 会把命令解析到**项目固定的那个版本**上（先按覆盖后的 PATH 找可执行文件，再启动），退出码原样返回，可以直接放进脚本。
+
+`envmgr env` 在部分版本缺失时仍导出已经解析的 SDK，并把缺失项写到 stderr（退出码 0），这样钩子不会因为一个版本没装而丢掉整个环境；`envmgr run` 保持严格，缺任何一个版本都不启动。`envmgr remove` 默认拒绝删除仍被项目使用的版本并列出这些项目，确认后再加 `--force`。
+
+## 项目一键就绪与安装任务
+
+项目详情的「一键就绪」会先解析项目声明，并检查全部缺失 SDK 是否有匹配的可下载版本；检查通过后依次安装，最后执行每个 SDK 的版本命令，核对实际版本。已安装的 SDK 直接验证；Ruby 等需要手动导入的 SDK 会给出明确说明。Java 自动安装优先使用默认来源 Temurin。
+
+下载安装页的「任务与历史」显示下载、校验、解包、安装等阶段，提供取消、失败原因和重试。取消会等待后台任务退出，未完成的解包目录会清理；下载保留断点文件，重试可继续下载。项目就绪任务也在项目详情显示。历史保留本次运行最近 50 条完成、失败或取消记录，关闭应用后清空。
+
+项目声明的 SDK 缺失或配置损坏时，`envmgr run`、激活脚本导出和终端按钮会报错，避免意外使用系统中其他版本。项目配置是版本固定的统一来源，GUI、CLI 和外部修改都在后续解析时生效；`use` 合并已有固定版本，保留其他配置字段。状态更新使用跨进程文件锁与原子写入，GUI 与 CLI 可同时使用。
 
 ## 工具链与版本管理器
 
@@ -323,7 +342,8 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 
 | 内容 | 位置 |
 | --- | --- |
-| 配置与项目列表 | `~/.envmgr/state.json`（原子写入，损坏时保留 `.bad` 备份） |
+| 配置与项目列表 | `~/.envmgr/state.json`（跨进程锁、原子写入；损坏时保留原文件并报错） |
+| 最近一次发现结果 | `~/.envmgr/discovery.json`（60 秒内有效；`env` 走缓存，缺失或过期时重扫） |
 | EnvMgr 装的 SDK | `~/.envmgr/sdk/<kind>/<version>` |
 | 版本管理器 | `~/.envmgr/managers/<id>` |
 | 下载缓存 | `~/.envmgr/downloads` |
@@ -351,6 +371,7 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 - 页面滚动回归：`go test ./internal/app -run 'OtherPages|SettingsWheel|ProjectPagesHandleRepeatedWheel|GroupedFeed' -count=1` 使用真实滚轮事件推进平滑动画，覆盖概览、项目、工具链、下载安装、体检、设置。大列表样本包含 1,000 个已装版本、5,000 个下载条目与 600 项体检结果，验证双向滚动、动画结束和可见行数量；同时检查设置页只使用缓存状态、版本源刷新和 LTS 切换不会沿用过期缓存。
 - 绘制路径不执行环境探测：设置页的 Git 能力、自动套用状态和 shell 钩子状态由后台快照提供；工具链排序和体检排序在快照更新时完成，下载源分组在数据到达时计算。工具链、下载和体检使用虚拟列表，仅构建可见行；设置页进入时异步更新检测结果，安装或移除钩子后也会更新快照。
 - `go test ./internal/core/` —— 版本比较与匹配、标记文件解析、PATH 覆盖与去重、zip-slip 防护、解包展平、项目内 pin 优先于标记文件、`LookPath` 优先使用覆盖后的 PATH。
+- 目录继承、部分生效与删除保护：`go test ./internal/core -run 'NearestProject|EnvForSubdirectory|FastService|RemoveRefuses' -count=1` 在临时 HOME 里验证向上查找、子目录自有声明优先、缺失版本不拖垮已解析的 SDK、快照复用与过期重扫，以及删除仍被项目使用的版本会被拒绝、只有 `RemoveForced` 才真正删掉；`go test ./internal/cli -run 'ResolvedSDKs' -count=1` 从命令行再验证一次根目录与子目录导出同一份环境。
 - `go test ./internal/core/` 里还有一组**真 git** 测试：临时仓库里跑 `git init`、写项目级 `user.name`/`user.email`、读回来、清空再确认回退到全局；用 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` 指向临时文件，绝不读写本机真实的 `~/.gitconfig`。
 - 控件几何回归：`go test ./internal/app -run 'SelectChevron|IconButtonGlyph|PinPickerKeeps' -count=1` 把渲染出的位图按触发条区域取墨迹包围盒，断言下拉箭头垂直居中于触发条（误差 ≤1.5 DIP）、右端距边缘 10–14 DIP、尺寸不超过 16×16，以及只有图标的按钮（打开目录、打开官网、复制路径、删除）里图标居中于 28×28 按钮（误差 ≤1 DIP）。换回旧的 `⌄` 字形箭头会让箭头中心比触发条低 4.9 DIP，换回带文字内边距的图标按钮会得到 30×28 而不是正方形，两种情况测试都会失败。
 - `go vet ./...`、`gofmt -l` 干净。
@@ -378,6 +399,8 @@ _notes          mygo API 备忘（编译验证过的速查表）
 ## 一点设计取舍
 
 - **不接管 shell**：钩子是可选的、打印出来的片段。装上它才有「进目录自动切换」，不装就完全无感。
+- **缺一个版本不拖垮全部，但 `run` 严格**：`env` 导出已经解析的 SDK 并把缺失项写进 stderr；`run`、终端按钮和一键就绪要求全部就绪，避免误用系统里的另一个版本。
+- **发现结果有 60 秒快照**：`cd` 是交互路径，不能每次重扫所有 SDK。外部工具刚装的版本最多 60 秒后才被 `env` 看到；`list`、GUI 和 `doctor` 始终全量扫描。
 - **不猜版本**：探测不到版本的目录不会被列出来。宁可少一个条目，也不在界面上显示一个错版本号。
 - **安装目录自持**：EnvMgr 装的 SDK 都在自己的目录里，删除即干净，不影响 nvm/pyenv 的既有布局。
 - **管理器只装官方发行版**：`n`、`volta`、`mise` 这类通过 npm/脚本自举的，给出官方命令和链接，不代替你执行。

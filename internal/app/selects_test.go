@@ -237,3 +237,19 @@ func TestPinPickerKeepsOneLineHeight(t *testing.T) {
 		t.Errorf("the pin picker is %v tall, too short to click: %v", info.Bounds.H, info.Bounds)
 	}
 }
+
+func TestPinPickerUsesCurrentFileResolution(t *testing.T) {
+	a := newTestApp(t)
+	a.pinBuf = make([]string, len(core.Kinds))
+	p := core.NewProject(t.TempDir())
+	p.Pins = map[core.Kind]string{core.Node: "18.16.0"}
+	installed := []core.Installed{{Kind: core.Node, Version: "24.13.0"}, {Kind: core.Node, Version: "18.16.0"}}
+	r := core.Resolution{Kind: core.Node, Expr: "24.13.0", Source: "pin", Installed: &installed[0]}
+	tt := ui.NewTester(func(c *ui.Context) {
+		ui.Column(c).Width(320).Children(func() { a.kindCard(c, p, core.Node, r, installed, false) })
+	}, 360, 400)
+	tt.Frame()
+	if a.pinBuf[kindIndexOf(core.Node)] != "24.13.0" {
+		t.Fatalf("stale store pin selected: %q", a.pinBuf[kindIndexOf(core.Node)])
+	}
+}

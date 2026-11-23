@@ -99,9 +99,9 @@ func remoteJobID(r core.Remote) string {
 
 // jobFor returns one of the running or finished jobs.
 func (a *App) jobFor(id string) *Job {
-	for _, j := range a.jobs {
-		if j.ID == id {
-			return j
+	for i := len(a.jobs) - 1; i >= 0; i-- {
+		if a.jobs[i].ID == id {
+			return a.jobs[i]
 		}
 	}
 	return nil
@@ -116,17 +116,6 @@ func (a *App) runningJobs() []*Job {
 		}
 	}
 	return out
-}
-
-// dropJob forgets a finished job.
-func (a *App) dropJob(job *Job) {
-	out := a.jobs[:0]
-	for _, j := range a.jobs {
-		if j != job {
-			out = append(out, j)
-		}
-	}
-	a.jobs = out
 }
 
 // remoteAction is what the download page should do with the list it has.
@@ -247,75 +236,6 @@ func (a *App) cacheRemoteView(kind core.Kind, list []core.Remote, grouped remote
 		a.remoteGroups = make(map[core.Kind]remoteGroupedView)
 	}
 	a.remoteGroups[kind] = grouped
-}
-
-// startInstall downloads and unpacks one version in the background.
-func (a *App) startInstall(r core.Remote) {
-	job := &Job{ID: remoteJobID(r), Label: "安装 " + core.Info(r.Kind).Name + " " + r.Version, Running: true}
-	a.jobs = append(a.jobs, job)
-	ctx, cancel := context.WithCancel(context.Background())
-	a.cancels = append(a.cancels, cancel)
-	win := a.win
-
-	notify := func(fn func()) {
-		if win == nil {
-			fn()
-			return
-		}
-		win.Update(fn)
-	}
-
-	go func() {
-		inst, err := a.svc.Install(ctx, r, func(done, total int64) {
-			notify(func() {
-				job.Done, job.Total = done, total
-				job.Detail = describeProgress(done, total)
-			})
-		})
-		notify(func() {
-			job.Running = false
-			a.dropJob(job)
-			if err != nil {
-				a.pushToast("安装失败：" + err.Error())
-				return
-			}
-			a.syncAndRecompute()
-			a.pushToast("已安装 " + core.Info(inst.Kind).Name + " " + inst.Version)
-			a.remoteList = ui.ListState{}
-		})
-	}()
-}
-
-// installManager fetches a version manager from its official release.
-func (a *App) installManager(m core.ManagerState) {
-	job := &Job{ID: "manager:" + m.ID, Label: "安装 " + m.Name, Running: true}
-	a.jobs = append(a.jobs, job)
-	win := a.win
-	notify := func(fn func()) {
-		if win == nil {
-			fn()
-			return
-		}
-		win.Update(fn)
-	}
-	go func() {
-		_, err := a.svc.InstallManager(context.Background(), m.ID, func(done, total int64) {
-			notify(func() {
-				job.Done, job.Total = done, total
-				job.Detail = describeProgress(done, total)
-			})
-		})
-		notify(func() {
-			job.Running = false
-			a.dropJob(job)
-			if err != nil {
-				a.pushToast(m.Name + " 安装失败：" + err.Error())
-				return
-			}
-			a.syncAndRecompute()
-			a.pushToast(m.Name + " 已就绪")
-		})
-	}()
 }
 
 // describeProgress is the line under a progress bar.
@@ -571,16 +491,37 @@ func (a *App) dialogs(c *ui.Context) {
 			ui.Text(c, "删除 "+info.Name+" "+inst.Version+"？").FontSize(14).Bold()
 			ui.Text(c, "这会把 "+inst.Path+" 从磁盘上移除，无法撤销。").FontSize(11).
 				TextColor(c.Theme().TextMuted).Wrap().MaxWidth(380)
+			if len(a.confirmRemoveUsers) > 0 {
+				names := make([]string, 0, len(a.confirmRemoveUsers))
+				for _, p := range a.confirmRemoveUsers {
+					names = append(names, p.Name)
+				}
+				ui.Text(c, fmt.Sprintf("%d 个项目仍在使用它：%s。删除后这些项目会缺少该版本。",
+					len(names), strings.Join(names, "、"))).
+					FontSize(11).TextColor(c.Theme().Warning).Wrap().MaxWidth(380)
+			}
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 				if ui.Button(c, "取消").Clicked() {
 					a.confirmRemove = nil
+					a.confirmRemoveUsers = nil
 				}
-				if ui.PrimaryButton(c, "删除").Clicked() {
+				label := "删除"
+				if len(a.confirmRemoveUsers) > 0 {
+					label = "仍要删除"
+				}
+				if ui.PrimaryButton(c, label).Clicked() {
 					target := *inst
+					users := len(a.confirmRemoveUsers)
 					a.confirmRemove = nil
+					a.confirmRemoveUsers = nil
 					go func() {
-						if err := a.svc.Remove(target); err != nil {
+						// The dialog already showed which projects depend on
+						// this version, so the user's confirmation is the
+						// force flag.
+						if err := a.svc.RemoveForced(target); err != nil {
 							a.pushToast(err.Error())
+						} else if users > 0 {
+							a.pushToast(fmt.Sprintf("已删除 %s，%d 个项目需要重新选版本", target.ID(), users))
 						} else {
 							a.pushToast("已删除 " + target.ID())
 						}
@@ -593,6 +534,7 @@ func (a *App) dialogs(c *ui.Context) {
 		})
 		if !open {
 			a.confirmRemove = nil
+			a.confirmRemoveUsers = nil
 		}
 	}
 
@@ -721,9 +663,13 @@ func (a *App) jobsBar(c *ui.Context) {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Spinner(c).Size(11, 11)
 					ui.Text(c, j.Label).FontSize(11.5).Bold().Grow(1).SingleLine().Ellipsis("…")
-					ui.Text(c, j.Detail).FontSize(10).TextColor(t.TextMuted).SingleLine()
+					ui.Text(c, j.Stage).FontSize(10).TextColor(t.TextMuted).SingleLine()
+					if !j.Cancelling && ui.Button(c, "取消").Label("取消 "+j.Label).Clicked() {
+						a.cancelJob(j)
+					}
 				})
 				ui.Progress(c, j.Progress()).Label(j.Label)
+				ui.Text(c, j.Detail).FontSize(10).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 			})
 		}
 	})

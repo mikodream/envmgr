@@ -369,7 +369,11 @@ func TestBinDirsExistOnDisk(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	exe := filepath.Join(root, ExecName(string(Node)))
+	bin := sub
+	if runtime.GOOS == "windows" {
+		bin = root
+	}
+	exe := filepath.Join(bin, ExecName(string(Node)))
 	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}

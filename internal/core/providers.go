@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // Remote is one version offered for download.
@@ -92,6 +94,12 @@ func installPath(cfg Config, kind Kind, version string) (string, error) {
 // layout, then move it into place in one rename. A half-unpacked SDK never
 // appears under the version it claims.
 func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progress Progress, tidy func(string) error) (Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return Installed{}, err
+	}
+	if !validInstallComponent(r.File) || !validInstallComponent(r.InstallName()) {
+		return Installed{}, fmt.Errorf("安装文件名或版本目录无效")
+	}
 	cache, err := CacheDir(cfg)
 	if err != nil {
 		return Installed{}, err
@@ -100,6 +108,12 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 		return Installed{}, err
 	}
 	archive := filepath.Join(cache, r.File)
+	unlock, err := lockInstallPath(ctx, archive)
+	if err != nil {
+		return Installed{}, err
+	}
+	defer unlock()
+	reportInstallStage(ctx, "下载")
 	if st, err := os.Stat(archive); err != nil || st.Size() == 0 {
 		if err := Download(ctx, r.URL, archive, progress); err != nil {
 			return Installed{}, err
@@ -107,6 +121,10 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 	} else if progress != nil {
 		progress(st.Size(), st.Size())
 	}
+	if err := ctx.Err(); err != nil {
+		return Installed{}, err
+	}
+	reportInstallStage(ctx, "校验")
 	if err := VerifySHA256(archive, r.SHA256); err != nil {
 		// A corrupt archive would fail again on the next try.
 		_ = os.Remove(archive)
@@ -117,12 +135,21 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 	if err != nil {
 		return Installed{}, err
 	}
-	tmp := dest + ".tmp"
-	_ = os.RemoveAll(tmp)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return Installed{}, err
 	}
-	if err := Extract(archive, tmp); err != nil {
+	release, err := lockInstallPath(ctx, dest)
+	if err != nil {
+		return Installed{}, err
+	}
+	defer release()
+	tmp, err := os.MkdirTemp(filepath.Dir(dest), ".install-*")
+	if err != nil {
+		return Installed{}, err
+	}
+	defer os.RemoveAll(tmp) // tmp is the unique directory returned by MkdirTemp above.
+	reportInstallStage(ctx, "解包")
+	if err := ExtractContext(ctx, archive, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return Installed{}, err
 	}
@@ -136,16 +163,64 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 			return Installed{}, err
 		}
 	}
-	_ = os.RemoveAll(dest)
-	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.RemoveAll(tmp)
+	probe := ScanInstall(Installed{Kind: kind, Version: r.Version, Path: tmp, Manager: "envmgr"})
+	if probe.ExePath() == "" {
+		return Installed{}, fmt.Errorf("安装包缺少 %s 可执行文件", kind)
+	}
+	if err := ctx.Err(); err != nil {
 		return Installed{}, err
 	}
-	inst := ScanInstall(Installed{Kind: kind, Version: r.Version, Path: dest, Manager: "envmgr"})
-	if inst.ExePath() == "" {
-		return inst, fmt.Errorf("安装完成，但未在 %s 找到可执行文件", dest)
+	reportInstallStage(ctx, "安装")
+	if err := publishInstallDirectory(tmp, dest); err != nil {
+		return Installed{}, err
 	}
-	return inst, nil
+	return ScanInstall(Installed{Kind: kind, Version: r.Version, Path: dest, Manager: "envmgr"}), nil
+}
+
+// publishInstallDirectory restores the previous installation if publication fails.
+func publishInstallDirectory(tmp, dest string) error {
+	// Preserve a working previous install until the replacement is published.
+	backup := tmp + "-previous"
+	hadPrevious := false
+	if _, err := os.Lstat(dest); err == nil {
+		if err := os.Rename(dest, backup); err != nil {
+			return err
+		}
+		hadPrevious = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		if hadPrevious {
+			if restoreErr := os.Rename(backup, dest); restoreErr != nil {
+				return fmt.Errorf("安装失败：%v；恢复失败：%v，旧版本保留于 %s", err, restoreErr, backup)
+			}
+		}
+		return err
+	}
+	if hadPrevious {
+		_ = os.RemoveAll(backup)
+	}
+	return nil
+}
+
+func validInstallComponent(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\\`) && filepath.Base(name) == name
+}
+
+// lockInstallPath also coordinates project readiness, manual installs and CLI processes.
+func lockInstallPath(ctx context.Context, path string) (func(), error) {
+	lock := flock.New(path + ".lock")
+	ok, err := lock.TryLockContext(ctx, 50*time.Millisecond)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	if !ok {
+		_ = lock.Close()
+		return nil, fmt.Errorf("等待安装锁失败")
+	}
+	return func() { _ = lock.Close() }, nil
 }
 
 // downloader is the OS and architecture names this machine's feeds use.
@@ -520,6 +595,12 @@ func (rustInstaller) Fetch(ctx context.Context, r Remote, cfg Config, progress P
 		return Installed{}, err
 	}
 	initPath := filepath.Join(cache, rustupName())
+	unlock, err := lockInstallPath(ctx, initPath)
+	if err != nil {
+		return Installed{}, err
+	}
+	defer unlock()
+	reportInstallStage(ctx, "下载")
 	if _, err := os.Stat(initPath); err != nil {
 		if err := Download(ctx, r.URL, initPath, progress); err != nil {
 			return Installed{}, err
@@ -542,6 +623,10 @@ func (rustInstaller) Fetch(ctx context.Context, r Remote, cfg Config, progress P
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return Installed{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Installed{}, err
+	}
+	reportInstallStage(ctx, "安装")
 	cmd := exec.CommandContext(ctx, initPath,
 		"--no-modify-path", "-y", "--profile", "minimal",
 		"--default-toolchain", r.Version)
@@ -605,6 +690,9 @@ func NewCatalog() *Catalog {
 
 // List returns the versions of a kind, from the cache when fresh.
 func (c *Catalog) List(ctx context.Context, kind Kind, cfg Config, force bool) ([]Remote, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	entry, ok := c.cache[kind]
 	c.mu.Unlock()
@@ -616,9 +704,15 @@ func (c *Catalog) List(ctx context.Context, kind Kind, cfg Config, force bool) (
 		return nil, fmt.Errorf("%s 暂不支持下载安装", Info(kind).Name)
 	}
 	list, err := inst.List(ctx, cfg)
-	c.mu.Lock()
-	c.cache[kind] = catalogEntry{list: list, at: time.Now(), err: err}
-	c.mu.Unlock()
+	if err == nil {
+		err = ctx.Err()
+	}
+	// Failed and cancelled requests must remain retryable immediately.
+	if err == nil {
+		c.mu.Lock()
+		c.cache[kind] = catalogEntry{list: list, at: time.Now()}
+		c.mu.Unlock()
+	}
 	return list, err
 }
 

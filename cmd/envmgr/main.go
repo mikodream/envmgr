@@ -18,10 +18,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -65,6 +67,13 @@ func runWindow() {
 		log.Fatalf("读取配置失败: %v", err)
 	}
 	state := app.New(svc)
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := state.Shutdown(ctx); err != nil {
+			log.Printf("等待安装任务清理: %v", err)
+		}
+	})
 
 	mygo.App.OnSecondInstance(func(args []string, dir string) {
 		if wins := mygo.Windows(); len(wins) > 0 {

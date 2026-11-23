@@ -4,6 +4,8 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,11 +56,14 @@ func ReadProjectPins(dir string) (map[Kind]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var file struct {
+	var file *struct {
 		Pins map[string]string `json:"pins"`
 	}
 	if err := json.Unmarshal(b, &file); err != nil {
 		return nil, err
+	}
+	if file == nil {
+		return nil, errors.New("项目配置必须是 JSON 对象")
 	}
 	out := make(map[Kind]string, len(file.Pins))
 	for name, expr := range file.Pins {
@@ -77,6 +82,56 @@ func projectID(path string) string {
 
 // Pin returns the pinned expression for a kind.
 func (p Project) Pin(kind Kind) string { return p.Pins[kind] }
+
+// declarationFiles are the project files that mean "this directory pins SDK
+// versions". NearestProjectDir climbs until it finds one, so a command run in
+// src/ still sees the project root's .nvmrc, the way nvm and pyenv do.
+var declarationFiles = []string{
+	ConfigFileName,
+	".nvmrc",
+	".node-version",
+	".python-version",
+	".java-version",
+	".sdkmanrc",
+	".go-version",
+	"go.mod",
+	"rust-toolchain",
+	"rust-toolchain.toml",
+	".ruby-version",
+	".tool-versions",
+}
+
+// HasVersionDeclaration reports whether dir itself carries a version
+// declaration, without parsing it. A malformed .envmgr.json still counts:
+// Resolve reports the error instead of quietly walking past the project.
+func HasVersionDeclaration(dir string) bool {
+	for _, name := range declarationFiles {
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// NearestProjectDir walks up from dir to the closest directory that declares
+// versions. A monorepo's subdirectories inherit its environment, and a nested
+// package with its own .nvmrc wins over the parent.
+func NearestProjectDir(dir string) (string, bool) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = filepath.Clean(dir)
+	}
+	for {
+		if HasVersionDeclaration(abs) {
+			return abs, true
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return "", false
+		}
+		abs = parent
+	}
+}
 
 // Marker is a version request found in one of a project's files.
 type Marker struct {
@@ -248,6 +303,8 @@ func goModVersion(body string) string {
 
 // Resolution is what one project asks of one SDK, and what satisfies it.
 type Resolution struct {
+	// Err reports an unreadable or invalid project configuration.
+	Err    error
 	Kind   Kind
 	Expr   string
 	Source string
@@ -261,18 +318,25 @@ type Resolution struct {
 // Resolve works out the environment of a project: explicit pins first, then
 // the marker files of the tools it already uses.
 func Resolve(p Project, installed []Installed, followMarkers bool) []Resolution {
+	pins, err := ReadProjectPins(p.Path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return []Resolution{{Source: ConfigFileName, Err: fmt.Errorf("读取 %s: %w", ConfigFileName, err)}}
+	}
 	wanted := map[Kind]Resolution{}
 
 	if followMarkers {
 		for _, m := range DetectMarkers(p.Path) {
+			if m.File == ConfigFileName {
+				continue
+			}
 			if _, ok := wanted[m.Kind]; ok {
 				continue // the first marker for a kind wins
 			}
 			wanted[m.Kind] = Resolution{Kind: m.Kind, Expr: m.Expr, Source: m.File}
 		}
 	}
-	// A pin in EnvMgr's own config, or in the store, overrides a marker.
-	for kind, expr := range p.Pins {
+	// The project file is the only source of explicit pins.
+	for kind, expr := range pins {
 		if expr == "" {
 			continue
 		}
@@ -295,26 +359,72 @@ func Resolve(p Project, installed []Installed, followMarkers bool) []Resolution 
 	return out
 }
 
-// WriteProjectConfig writes EnvMgr's pins into a project directory.
+// WriteProjectConfig replaces pins atomically, preserving other JSON fields.
+// For concurrent partial edits use UpdateProjectPins instead.
 func WriteProjectConfig(dir string, pins map[Kind]string) error {
-	if len(pins) == 0 {
-		path := filepath.Join(dir, ConfigFileName)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	return withFileLock(filepath.Join(dir, ConfigFileName), func() error {
+		return writeProjectConfigLocked(dir, pins)
+	})
+}
+
+// UpdateProjectPins atomically merges multiple SDK edits. An empty expression
+// deletes that SDK's pin; unrelated pins and configuration fields survive.
+func UpdateProjectPins(dir string, updates map[Kind]string) error {
+	return withFileLock(filepath.Join(dir, ConfigFileName), func() error {
+		pins, err := ReadProjectPins(dir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return nil
+		if pins == nil {
+			pins = map[Kind]string{}
+		}
+		for kind, expr := range updates {
+			if _, ok := ParseKind(string(kind)); !ok {
+				return fmt.Errorf("未知 SDK: %s", kind)
+			}
+			if expr == "" {
+				delete(pins, kind)
+			} else {
+				pins[kind] = expr
+			}
+		}
+		return writeProjectConfigLocked(dir, pins)
+	})
+}
+
+func SetProjectPin(dir string, kind Kind, version string) error {
+	return UpdateProjectPins(dir, map[Kind]string{kind: version})
+}
+
+func writeProjectConfigLocked(dir string, pins map[Kind]string) error {
+	path := filepath.Join(dir, ConfigFileName)
+	file := map[string]json.RawMessage{}
+	b, err := os.ReadFile(path)
+	if err == nil {
+		if err := json.Unmarshal(b, &file); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if file == nil {
+		return errors.New("项目配置必须是 JSON 对象")
 	}
 	plain := map[string]string{}
 	for k, v := range pins {
-		plain[string(k)] = v
+		if v != "" {
+			plain[string(k)] = v
+		}
 	}
-	b, err := json.MarshalIndent(struct {
-		Pins map[string]string `json:"pins"`
-	}{plain}, "", "  ")
+	file["pins"], err = json.Marshal(plain)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, ConfigFileName), append(b, '\n'), 0o644)
+	b, err = json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, append(b, '\n'), 0o644)
 }
 
 // ProjectHealth summarizes a project for the list: how many SDKs resolve.
@@ -328,7 +438,7 @@ type ProjectHealth struct {
 func Health(res []Resolution) ProjectHealth {
 	h := ProjectHealth{Total: len(res)}
 	for _, r := range res {
-		if r.Missing {
+		if r.Missing || r.Err != nil {
 			h.Missing++
 		} else {
 			h.Resolved++

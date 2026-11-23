@@ -453,6 +453,10 @@ func checkProjects(svc *Service, installed []Installed, put putFunc) {
 		}
 		var okParts, missingParts []string
 		for _, r := range res {
+			if r.Err != nil {
+				missingParts = append(missingParts, "配置错误："+r.Err.Error())
+				continue
+			}
 			name := Info(r.Kind).Name
 			if r.Missing {
 				missingParts = append(missingParts, name+" "+r.Expr)

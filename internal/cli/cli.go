@@ -99,7 +99,13 @@ func Run(args []string) int {
 		PrintUsage(os.Stdout)
 		return 0
 	}
-	svc, err := core.NewService()
+	open := core.NewService
+	// The shell hook runs `env` on every directory change. It only needs what
+	// the last full scan found, so it takes the cached path.
+	if args[0] == "env" {
+		open = core.NewFastService
+	}
+	svc, err := open()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "读取配置失败:", err)
 		return 1
@@ -149,6 +155,10 @@ func flagValue(args []string, name, def string) (string, []string) {
 	value := def
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
 		if a == "--"+name {
 			if i+1 < len(args) {
 				value = args[i+1]
@@ -191,13 +201,41 @@ func cmdEnv(svc *core.Service, args []string) int {
 	}
 	env := svc.EnvForDir(dir)
 	if env.Empty() {
+		if len(env.Issues) > 0 {
+			printEnvIssues(env.Issues)
+			return 1
+		}
 		if !quiet {
 			fmt.Fprintf(os.Stderr, "%s 没有版本声明\n", dir)
 		}
 		return 0
 	}
-	fmt.Print(env.Export(sh))
+	fmt.Print(env.ExportResolved(sh))
+	// A project can ask for six SDKs and have only two installed. Exporting
+	// the two that resolve beats silently dropping the whole environment; the
+	// ones still missing are reported on stderr. The hook passes --quiet, so
+	// only entering the project root warns instead of every subdirectory.
+	if len(env.Issues) > 0 && envIssuesVisible(dir, quiet) {
+		printEnvIssues(env.Issues)
+	}
 	return 0
+}
+
+// envIssuesVisible keeps a project with a missing version from nagging on
+// every `cd` inside it. Direct calls always see the warning; the hook only
+// shows it at the directory that declares the versions.
+func envIssuesVisible(dir string, quiet bool) bool {
+	if !quiet {
+		return true
+	}
+	root, ok := core.NearestProjectDir(dir)
+	return ok && core.SamePath(dir, root)
+}
+
+func printEnvIssues(issues []string) {
+	for _, issue := range issues {
+		fmt.Fprintln(os.Stderr, "envmgr: "+issue)
+	}
 }
 
 // cmdRun runs a command inside the project's environment.
@@ -242,12 +280,6 @@ func cmdUse(svc *core.Service, args []string) int {
 	}
 	installed := svc.Installed()
 	pins := map[core.Kind]string{}
-	// Keep pins already in the file.
-	if p, ok := svc.Store().ProjectByPath(dir); ok {
-		for k, v := range p.Pins {
-			pins[k] = v
-		}
-	}
 	for _, arg := range args {
 		kindName, version, ok := strings.Cut(arg, "@")
 		if !ok {
@@ -275,7 +307,7 @@ func cmdUse(svc *core.Service, args []string) int {
 		pins[kind] = version
 		fmt.Printf("%s 固定为 %s\n", core.Info(kind).Name, version)
 	}
-	if err := core.WriteProjectConfig(dir, pins); err != nil {
+	if err := core.UpdateProjectPins(dir, pins); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -476,12 +508,21 @@ func vendorIDs() []string {
 
 // cmdRemove deletes a version EnvMgr installed.
 func cmdRemove(svc *core.Service, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "用法: envmgr remove node@20.11.1")
+	force := hasFlag(args, "force")
+	specs := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "--") {
+			continue
+		}
+		specs = append(specs, a)
+	}
+	if len(specs) == 0 {
+		fmt.Fprintln(os.Stderr, "用法: envmgr remove node@20.11.1 [--force]")
+		fmt.Fprintln(os.Stderr, "      --force 仍被项目使用时也删除")
 		return 2
 	}
 	code := 0
-	for _, arg := range args {
+	for _, arg := range specs {
 		kindName, version, ok := strings.Cut(arg, "@")
 		if !ok {
 			fmt.Fprintf(os.Stderr, "%q 需要写成 名称@版本\n", arg)
@@ -500,7 +541,11 @@ func cmdRemove(svc *core.Service, args []string) int {
 			code = 1
 			continue
 		}
-		if err := svc.Remove(inst); err != nil {
+		remove := svc.Remove
+		if force {
+			remove = svc.RemoveForced
+		}
+		if err := remove(inst); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			code = 1
 			continue
@@ -555,15 +600,28 @@ func doctorDir(svc *core.Service, dir string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	requested := path
+	// A subdirectory inherits its project root, so report the directory that
+	// actually decides the versions rather than "没有版本声明".
+	if root, ok := core.NearestProjectDir(path); ok {
+		path = root
+	}
 	p := core.NewProject(path)
-	res := core.Resolve(p, svc.Installed(), svc.Config().FollowMarkers)
+	res := svc.Resolve(p)
 	fmt.Printf("%s\n", path)
+	if !core.SamePath(path, requested) {
+		fmt.Printf("  · 从 %s 向上找到这个项目\n", requested)
+	}
 	if len(res) == 0 {
 		fmt.Println("  · 没有版本声明")
 		return 0
 	}
 	missing := 0
 	for _, r := range res {
+		if r.Err != nil {
+			fmt.Fprintln(os.Stderr, "项目配置错误：", r.Err)
+			return 1
+		}
 		info := core.Info(r.Kind)
 		if r.Missing {
 			missing++

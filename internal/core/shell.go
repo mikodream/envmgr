@@ -82,7 +82,28 @@ func CurrentShell() Shell {
 // This is what makes EnvMgr useful without a global change: the shell asks
 // EnvMgr for a directory's environment, evaluates the answer, and the
 // variables live in that shell only.
+//
+// An incomplete project exports nothing here: callers that promise a fully
+// working environment (run, the terminal button, the activation script) must
+// not silently fall back to the system SDK.
 func (e Env) Export(sh Shell) string {
+	if e.Validate() != nil {
+		return ""
+	}
+	return e.exportResolved(sh)
+}
+
+// ExportResolved renders the SDKs that did resolve and ignores requests that
+// are still missing. The shell hook uses it so one absent version cannot erase
+// the whole project; the caller is responsible for reporting e.Issues.
+func (e Env) ExportResolved(sh Shell) string {
+	return e.exportResolved(sh)
+}
+
+func (e Env) exportResolved(sh Shell) string {
+	if e.Empty() {
+		return ""
+	}
 	var b strings.Builder
 	// One comment line per resolved SDK. Comments are valid in every shell
 	// EnvMgr writes for, so the script still evaluates to the same thing, and
@@ -207,7 +228,7 @@ function global:__envmgr_hook {
         else { Set-Item "Env:$k" $v }
     }
     $Global:ENVMGR_ORIGINAL = @{}
-    $out = & '@ENVMGR@' env --shell pwsh --quiet 2>$null
+    $out = & '@ENVMGR@' env --shell pwsh --quiet
     if (-not $out) { return }
     # 记下即将被覆盖的变量原值
     foreach ($line in $out) {
@@ -273,7 +294,7 @@ function __envmgr_hook --on-variable PWD
         set -e $name
     end
     set -g ENVMGR_TOUCHED
-    set -l out ('@ENVMGR@' env --shell fish --quiet 2>/dev/null)
+    set -l out ('@ENVMGR@' env --shell fish --quiet)
     if test -z "$out"
         return
     end
@@ -375,7 +396,7 @@ __envmgr_hook() {
         unset "ENVMGR_ORIG_$__n"
     done
     ENVMGR_TOUCHED=""
-    __out="$('@ENVMGR@' env --shell ` + string(sh) + ` --quiet 2>/dev/null)"
+    __out="$('@ENVMGR@' env --shell ` + string(sh) + ` --quiet)"
     if [ -z "$__out" ]; then
         unset __out
         return
@@ -867,6 +888,9 @@ func posixShellCommand(e Env, shell string) (string, bool) {
 // The child shell is started with the project's environment already in
 // place, which is why no global variable ever needs to change.
 func LaunchTerminal(dir string, e Env, term Terminal) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
 	env := Environ(e)
 	env = append(env, "ENVMGR_ACTIVE="+dir)
 	switch runtime.GOOS {
@@ -997,6 +1021,9 @@ func launchMacTerminal(dir string, e Env) error {
 // RunCommand runs a program with the overlay applied, in dir, wired to this
 // process's standard streams. It returns the program's exit code.
 func RunCommand(dir string, e Env, args []string) (int, error) {
+	if err := e.Validate(); err != nil {
+		return 1, err
+	}
 	if len(args) == 0 {
 		return 1, errors.New("没有要运行的程序")
 	}

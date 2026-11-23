@@ -162,15 +162,23 @@ func VerifySHA256(path, want string) error {
 
 // Extract unpacks an archive into dst, choosing the format by extension.
 func Extract(archive, dst string) error {
+	return ExtractContext(context.Background(), archive, dst)
+}
+
+// ExtractContext unpacks an archive and stops when ctx is canceled.
+func ExtractContext(ctx context.Context, archive, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
 	}
 	name := strings.ToLower(archive)
 	switch {
 	case strings.HasSuffix(name, ".zip"):
-		return extractZip(archive, dst)
+		return extractZip(ctx, archive, dst)
 	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
-		return extractTarGz(archive, dst)
+		return extractTarGz(ctx, archive, dst)
 	case strings.HasSuffix(name, ".tar.xz"):
 		return errors.New("暂不支持 tar.xz 归档")
 	default:
@@ -186,31 +194,107 @@ func safeJoin(dst, name string) (string, error) {
 	}
 	full := filepath.Join(dst, clean)
 	rel, err := filepath.Rel(dst, full)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("归档包含非法路径：%s", name)
 	}
 	return full, nil
 }
 
-func extractZip(archive, dst string) error {
+// safeArchiveLink resolves existing symlinks without cleaning away '..' first.
+// Missing targets are allowed because SDK links often precede their files.
+func safeArchiveLink(ctx context.Context, root *os.Root, name string) error {
+	pending := strings.Split(filepath.ToSlash(name), "/")
+	var parts []string
+	links := 0
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) == 0 {
+				return fmt.Errorf("归档包含非法链接：%s", name)
+			}
+			parts = parts[:len(parts)-1]
+			continue
+		}
+		candidate := filepath.Join(filepath.Join(parts...), part)
+		st, err := root.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			parts = append(parts, part)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink == 0 {
+			parts = append(parts, part)
+			continue
+		}
+		links++
+		if links > 255 {
+			return fmt.Errorf("归档链接循环：%s", name)
+		}
+		link, err := root.Readlink(candidate)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(link) {
+			return fmt.Errorf("归档包含非法链接：%s", name)
+		}
+		pending = append(strings.Split(filepath.ToSlash(link), "/"), pending...)
+	}
+	return nil
+}
+
+// archiveContextReader keeps large entry copies responsive to cancellation.
+type archiveContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r archiveContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.r.Read(p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
+}
+
+func extractZip(ctx context.Context, archive, dst string) error {
 	r, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, f := range r.File {
-		target, err := safeJoin(dst, f.Name)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		target, err := safeJoin(".", f.Name)
 		if err != nil {
 			return err
 		}
 		mode := f.Mode()
 		if mode.IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
 		rc, err := f.Open()
@@ -221,12 +305,12 @@ func extractZip(archive, dst string) error {
 		if mode.Perm()&0o111 != 0 {
 			perm = 0o755
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+		out, err := root.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 		if err != nil {
 			rc.Close()
 			return err
 		}
-		if _, err := io.Copy(out, rc); err != nil {
+		if _, err := io.Copy(out, archiveContextReader{ctx: ctx, r: rc}); err != nil {
 			out.Close()
 			rc.Close()
 			return err
@@ -237,62 +321,87 @@ func extractZip(archive, dst string) error {
 	return nil
 }
 
-func extractTarGz(archive, dst string) error {
+func extractTarGz(ctx context.Context, archive, dst string) error {
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	gz, err := gzip.NewReader(archiveContextReader{ctx: ctx, r: f})
 	if err != nil {
 		return err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	tr := tar.NewReader(archiveContextReader{ctx: ctx, r: gz})
+	var symlinks []string
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			// Later entries can change the meaning of an earlier link's target.
+			for _, name := range symlinks {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := safeArchiveLink(ctx, root, name); err != nil {
+					_ = root.Remove(name)
+					return err
+				}
+			}
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		target, err := safeJoin(dst, hdr.Name)
+		target, err := safeJoin(".", hdr.Name)
 		if err != nil {
 			return err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
-			// Keep the link only when it stays inside the destination.
-			link := hdr.Linkname
+			// Link names are relative to the link's parent, not the archive root.
+			// Root.Symlink confines the link location but does not validate its value.
+			link := filepath.FromSlash(hdr.Linkname)
 			if filepath.IsAbs(link) {
-				continue
+				return fmt.Errorf("归档包含非法链接：%s", hdr.Linkname)
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := safeArchiveLink(ctx, root, filepath.Dir(target)+string(filepath.Separator)+link); err != nil {
 				return err
 			}
-			_ = os.Remove(target)
-			if err := os.Symlink(link, target); err != nil {
-				// Filesystems without symlinks: copy nothing, skip.
-				continue
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
 			}
+			if err := root.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := root.Symlink(link, target); err != nil {
+				return err
+			}
+			symlinks = append(symlinks, target)
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
 			perm := os.FileMode(hdr.Mode).Perm()
 			if perm == 0 {
 				perm = 0o644
 			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+			out, err := root.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(out, tr); err != nil {
+			if _, err := io.Copy(out, archiveContextReader{ctx: ctx, r: tr}); err != nil {
 				out.Close()
 				return err
 			}

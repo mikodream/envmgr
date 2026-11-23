@@ -38,13 +38,21 @@ var pageTitles = []struct {
 
 // Job is one background operation with progress the UI shows.
 type Job struct {
-	ID      string
-	Label   string
-	Detail  string
-	Done    int64
-	Total   int64
-	Err     error
-	Running bool
+	ID         string
+	Label      string
+	Stage      string
+	Detail     string
+	Done       int64
+	Total      int64
+	Err        error
+	Running    bool
+	Cancelling bool
+	Status     JobStatus
+
+	cancel       context.CancelFunc
+	run          jobWork
+	initialStage string
+	workerDone   chan struct{}
 }
 
 // Progress reports 0..1, or -1 when the size is unknown.
@@ -167,10 +175,13 @@ type App struct {
 
 	// Dialog state.
 	confirmRemove *core.Installed
-	confirmForget *core.Installed
-	confirmDelete *core.Project
-	showEnvFor    int // project index whose environment is expanded, -1 none
-	envOpen       bool
+	// confirmRemoveUsers lists the projects that still resolve to the version
+	// in confirmRemove, so the confirmation can say what deletion breaks.
+	confirmRemoveUsers []core.Project
+	confirmForget      *core.Installed
+	confirmDelete      *core.Project
+	showEnvFor         int // project index whose environment is expanded, -1 none
+	envOpen            bool
 	// Adding a version that lives where discovery does not look.
 	addOpen    bool
 	addKindIdx int
@@ -186,7 +197,9 @@ type App struct {
 	pinBuf []string
 
 	jobs          []*Job
-	cancels       []context.CancelFunc
+	tasks         taskService
+	taskUpdate    func(func()) // Optional UI dispatcher for headless state tests.
+	jobList       ui.ListState
 	pendingToasts []string
 
 	mu          sync.Mutex

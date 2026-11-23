@@ -53,14 +53,31 @@ func NewService() (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{
+	s := newService(store)
+	s.Refresh()
+	return s, nil
+}
+
+// NewFastService opens the store for a latency-sensitive read such as the
+// shell hook's `env` call. It reuses the last full discovery while that
+// snapshot is fresh and scans only when it is missing or stale.
+func NewFastService() (*Service, error) {
+	store, err := OpenStore()
+	if err != nil {
+		return nil, err
+	}
+	s := newService(store)
+	s.hydrateDiscovery()
+	return s, nil
+}
+
+func newService(store *Store) *Service {
+	return &Service{
 		store: store, catalog: NewCatalog(),
 		gitCache:   map[string]gitCacheEntry{},
 		gitLoading: map[string]bool{},
 		gitLoad:    loadGitForService,
 	}
-	s.Refresh()
-	return s, nil
 }
 
 // Git reads a directory's repository state without ever blocking the caller on
@@ -551,6 +568,7 @@ func (s *Service) Notify() {
 
 // Refresh rediscovers every SDK on this machine and tells the listeners.
 func (s *Service) Refresh() []Installed {
+	at := time.Now()
 	list := DiscoverAll(s.Config())
 	// Versions the user added by hand belong in the same list, so a project
 	// can pin them like any other.
@@ -559,6 +577,7 @@ func (s *Service) Refresh() []Installed {
 	s.installed = list
 	s.scanned = time.Now()
 	s.mu.Unlock()
+	saveDiscoverySnapshot(list, at)
 	s.Notify()
 	return list
 }
@@ -650,32 +669,16 @@ func (s *Service) Project(id string) (Project, bool) {
 // SetPin pins a version for a project. An empty version removes the pin, so
 // the project follows its marker files again.
 func (s *Service) SetPin(id string, kind Kind, version string) error {
-	err := s.store.Update(func(st *Store) {
-		for i := range st.Projects {
-			if st.Projects[i].ID != id {
-				continue
-			}
-			if st.Projects[i].Pins == nil {
-				st.Projects[i].Pins = map[Kind]string{}
-			}
-			if version == "" {
-				delete(st.Projects[i].Pins, kind)
-			} else {
-				st.Projects[i].Pins[kind] = version
-			}
-			st.Projects[i].LastOpened = time.Now()
-		}
-	})
-	if err != nil {
-		return err
+	p, ok := s.Project(id)
+	if !ok {
+		return errors.New("未找到项目")
 	}
-	// Mirror the pins into the project so other tools and clones see them.
-	if p, ok := s.Project(id); ok {
-		if err := WriteProjectConfig(p.Path, p.Pins); err != nil {
-			return fmt.Errorf("已保存，但写入 %s 失败：%w", ConfigFileName, err)
-		}
+	if err := SetProjectPin(p.Path, kind, version); err != nil {
+		return fmt.Errorf("写入 %s 失败：%w", ConfigFileName, err)
 	}
-	s.Notify()
+	// Pins live exclusively in the project file. A metadata save must never
+	// make a successful pin edit appear to have failed.
+	s.Touch(id)
 	return nil
 }
 
@@ -693,7 +696,11 @@ func (s *Service) Touch(id string) {
 
 // Resolve works out what a project runs with.
 func (s *Service) Resolve(p Project) []Resolution {
-	return Resolve(p, s.Installed(), s.Config().FollowMarkers)
+	cfg := s.Config()
+	if err := s.store.ReadError(); err != nil {
+		return []Resolution{{Source: "state.json", Err: err}}
+	}
+	return Resolve(p, s.Installed(), cfg.FollowMarkers)
 }
 
 // ManualInstalls returns the versions the user added by hand, resolved into
@@ -772,16 +779,25 @@ func (s *Service) EnvFor(p Project) Env {
 	return BuildEnv(s.Resolve(p))
 }
 
-// EnvForDir resolves a directory that need not be a managed project.
+// EnvForDir resolves a directory that need not be a managed project. It walks
+// up to the closest directory that declares versions, so a shell sitting in
+// src/ gets the same environment as its project root.
 func (s *Service) EnvForDir(dir string) Env {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		abs = dir
+		abs = filepath.Clean(dir)
 	}
 	if p, ok := s.store.ProjectByPath(abs); ok {
 		return s.EnvFor(p)
 	}
-	return BuildEnv(Resolve(NewProject(abs), s.Installed(), s.Config().FollowMarkers))
+	root, ok := NearestProjectDir(abs)
+	if !ok {
+		return Env{}
+	}
+	if p, ok := s.store.ProjectByPath(root); ok {
+		return s.EnvFor(p)
+	}
+	return s.EnvFor(NewProject(root))
 }
 
 // ListRemote returns the downloadable versions of a kind.
@@ -803,9 +819,54 @@ func (s *Service) Install(ctx context.Context, r Remote, progress Progress) (Ins
 	return installed, nil
 }
 
-// Remove deletes a version EnvMgr installed. Versions belonging to another
+// VersionInUseError refuses to delete a version that a project still pins.
+type VersionInUseError struct {
+	Kind     Kind
+	Version  string
+	Projects []Project
+}
+
+func (e *VersionInUseError) Error() string {
+	names := make([]string, 0, len(e.Projects))
+	for _, p := range e.Projects {
+		names = append(names, p.Name)
+	}
+	return fmt.Sprintf("%s %s 仍被 %d 个项目使用：%s。先在这些项目里换版本，或加 --force 确认删除。",
+		Info(e.Kind).Name, e.Version, len(e.Projects), strings.Join(names, "、"))
+}
+
+// VersionUsers lists the projects whose current environment resolves to
+// kind@version. It is the reverse index behind the delete guard and answers
+// "who still needs this version".
+func (s *Service) VersionUsers(kind Kind, version string) []Project {
+	var users []Project
+	for _, p := range s.Projects() {
+		for _, r := range s.Resolve(p) {
+			if r.Installed != nil && r.Kind == kind && r.Installed.Version == version {
+				users = append(users, p)
+				break
+			}
+		}
+	}
+	return users
+}
+
+// Remove deletes a version EnvMgr installed, refusing while a project still
+// resolves to it.
+func (s *Service) Remove(inst Installed) error { return s.remove(inst, false) }
+
+// RemoveForced deletes a version even when projects still pin it. The caller
+// has shown the user which projects those are.
+func (s *Service) RemoveForced(inst Installed) error { return s.remove(inst, true) }
+
+// remove does the deletion after the guard. Versions belonging to another
 // manager are never touched: that would break the tool the user set up.
-func (s *Service) Remove(inst Installed) error {
+func (s *Service) remove(inst Installed, force bool) error {
+	if !force {
+		if users := s.VersionUsers(inst.Kind, inst.Version); len(users) > 0 {
+			return &VersionInUseError{Kind: inst.Kind, Version: inst.Version, Projects: users}
+		}
+	}
 	if inst.Manager != "envmgr" && inst.Manager != "rustup" {
 		return fmt.Errorf("%s 由 %s 管理，请在它那里卸载", inst.ID(), inst.Manager)
 	}

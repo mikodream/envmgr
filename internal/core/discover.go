@@ -102,7 +102,7 @@ func versionDirs(kind Kind, manager, p string) []Installed {
 	}
 	var out []Installed
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !dirExists(filepath.Join(p, e.Name())) {
 			continue
 		}
 		name := e.Name()
@@ -115,11 +115,17 @@ func versionDirs(kind Kind, manager, p string) []Installed {
 			continue
 		}
 		full := filepath.Join(p, name)
-		v := ProbeVersion(kind, full)
-		if v == "" {
-			continue
+		if kind == Java {
+			for _, sub := range []string{"Contents/Home", "Home"} {
+				if dirExists(filepath.Join(full, filepath.FromSlash(sub))) {
+					full = filepath.Join(full, filepath.FromSlash(sub))
+					break
+				}
+			}
 		}
-		out = append(out, ScanInstall(Installed{Kind: kind, Version: v, Path: full, Manager: manager}))
+		if inst, ok := rootInstall(kind, manager, full, ""); ok {
+			out = append(out, inst)
+		}
 	}
 	return out
 }
@@ -129,6 +135,10 @@ func versionDirs(kind Kind, manager, p string) []Installed {
 func rootInstall(kind Kind, manager, root, version string) (Installed, bool) {
 	if !dirExists(root) {
 		return Installed{}, false
+	}
+	// Store a stable SDK location rather than a manager's mutable alias.
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		root = real
 	}
 	if version == "" {
 		version = ProbeVersion(kind, root)
@@ -235,7 +245,7 @@ func DiscoverAll(cfg Config) []Installed {
 	if runtime.GOOS == "windows" {
 		addDir(Node, "nvm", join(xdgData(), "nvm"))
 	}
-	addDir(Node, "fnm", join(fnmDataDir(), "node-versions"))
+	add(fnmNodeInstalls()...)
 	addDir(Node, "n", join("/usr/local/n/versions/node"))
 	addDir(Node, "n", join(envOr("N_PREFIX", ""), "n", "versions", "node"))
 	addDir(Node, "n", join("~", "n", "versions", "node"))
@@ -278,11 +288,10 @@ func DiscoverAll(cfg Config) []Installed {
 		addJDKChildren(Java, "system", root)
 	}
 	if runtime.GOOS == "darwin" {
-		// macOS keeps JDKs as bundles; the SDK root is Contents/Home.
-		entries, _ := os.ReadDir(join("/Library/Java/JavaVirtualMachines"))
-		for _, e := range entries {
-			home := join("/Library/Java/JavaVirtualMachines", e.Name(), "Contents", "Home")
-			addRoot(Java, "system", home, "")
+		// Both system-wide and user-local JDK bundles are common on macOS.
+		for _, root := range []string{"/Library/Java/JavaVirtualMachines", join("~", "Library", "Java", "JavaVirtualMachines")} {
+			addDir(Java, "system", root)
+			addJDKChildren(Java, "system", root)
 		}
 	}
 	if runtime.GOOS == "windows" {
@@ -378,6 +387,10 @@ func pathInstall(kind Kind) (Installed, bool) {
 			p = real
 		}
 		binDir := filepath.Dir(p)
+		// Manager shims dispatch to an active version; they are not SDKs.
+		if filepath.Base(binDir) == "shims" {
+			continue
+		}
 		root := filepath.Dir(binDir)
 		// A version directory directly above bin is the SDK root; otherwise
 		// the binary sits in the root itself (Windows layouts).
@@ -387,9 +400,6 @@ func pathInstall(kind Kind) (Installed, bool) {
 		// A program without a version it can report is not an install to
 		// offer: guessing one would put a wrong version in front of the user.
 		version := ProbeVersion(kind, root)
-		if version == "" {
-			continue
-		}
 		if version == "" {
 			continue
 		}
@@ -423,16 +433,18 @@ func exeNames(base string) []string {
 	return []string{base}
 }
 
-// fnmDataDir is fnm's data directory, which differs per OS.
+// fnmDataDir is fnm's configured or first existing data directory.
 func fnmDataDir() string {
-	switch runtime.GOOS {
-	case "windows":
-		return join(xdgData(), "fnm")
-	case "darwin":
-		return join(appSupport(), "fnm")
-	default:
-		return join(xdgData(), "fnm")
+	dirs := fnmDataDirs()
+	if os.Getenv("FNM_DIR") != "" {
+		return dirs[0]
 	}
+	for _, dir := range dirs {
+		if dirExists(dir) {
+			return dir
+		}
+	}
+	return dirs[0]
 }
 
 // miseDataDir is mise's (formerly rtx) data directory.
@@ -452,7 +464,14 @@ func dedupeInstalls(list []Installed) []Installed {
 	seen := map[string]bool{}
 	out := make([]Installed, 0, len(list))
 	for _, inst := range list {
-		key := string(inst.Kind) + "|" + inst.Version + "|" + strings.ToLower(filepath.Clean(inst.Path))
+		path := filepath.Clean(inst.Path)
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			path = real
+		}
+		if runtime.GOOS == "windows" {
+			path = strings.ToLower(path)
+		}
+		key := string(inst.Kind) + "|" + inst.Version + "|" + path
 		if seen[key] {
 			continue
 		}

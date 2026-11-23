@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,16 @@ type Env struct {
 	// Pairs is what the overlay resolves to, for the banner the shell hook
 	// prints when it enters a project.
 	Pairs []Pair
+	// Issues prevents an incomplete project environment from silently using a system SDK.
+	Issues []string
+}
+
+// Validate reports unresolved SDK requests before any command or terminal starts.
+func (e Env) Validate() error {
+	if len(e.Issues) > 0 {
+		return fmt.Errorf("项目环境未就绪：%s", strings.Join(e.Issues, "；"))
+	}
+	return nil
 }
 
 // Pair is one SDK an overlay switched to.
@@ -38,6 +49,14 @@ func BuildEnv(res []Resolution) Env {
 	env := Env{}
 	seen := map[string]bool{}
 	for _, r := range res {
+		if r.Err != nil {
+			env.Issues = append(env.Issues, r.Err.Error())
+			continue
+		}
+		if r.Missing {
+			env.Issues = append(env.Issues, fmt.Sprintf("缺少 %s %s，请安装：envmgr install %s@%s", Info(r.Kind).Name, r.Expr, r.Kind, r.Expr))
+			continue
+		}
 		if r.Installed == nil {
 			continue
 		}

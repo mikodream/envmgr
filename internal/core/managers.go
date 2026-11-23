@@ -266,7 +266,7 @@ func InstallManager(ctx context.Context, cfg Config, id string, progress Progres
 		return ManagerState{}, err
 	}
 	dir := filepath.Join(base, target.Install.Dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(base, 0o755); err != nil {
 		return ManagerState{}, err
 	}
 	cache, err := CacheDir(cfg)
@@ -277,13 +277,29 @@ func InstallManager(ctx context.Context, cfg Config, id string, progress Progres
 		return ManagerState{}, err
 	}
 	archive := filepath.Join(cache, target.Install.Dir+"-"+filepath.Base(target.Install.URL))
+	unlock, err := lockInstallPath(ctx, archive)
+	if err != nil {
+		return ManagerState{}, err
+	}
+	defer unlock()
+	reportInstallStage(ctx, "下载")
 	if err := Download(ctx, target.Install.URL, archive, progress); err != nil {
 		return ManagerState{}, err
 	}
-	if err := Extract(archive, dir); err != nil {
+	workDir, err := os.MkdirTemp(base, ".manager-*")
+	if err != nil {
 		return ManagerState{}, err
 	}
-	if err := Flatten(dir); err != nil {
+	defer os.RemoveAll(workDir) // Unique temporary directory created above.
+	reportInstallStage(ctx, "解包")
+	if err := ExtractContext(ctx, archive, workDir); err != nil {
+		return ManagerState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ManagerState{}, err
+	}
+	reportInstallStage(ctx, "安装")
+	if err := Flatten(workDir); err != nil {
 		return ManagerState{}, err
 	}
 	switch runtime.GOOS {
@@ -291,11 +307,21 @@ func InstallManager(ctx context.Context, cfg Config, id string, progress Progres
 	default:
 		// GitHub archives keep the executable bit, but a zip through
 		// another path may not: make the launcher runnable.
-		launcher := filepath.Join(dir, filepath.FromSlash(target.Install.Launcher))
+		launcher := filepath.Join(workDir, filepath.FromSlash(target.Install.Launcher))
 		if fileExists(launcher) {
 			_ = os.Chmod(launcher, 0o755)
 		}
 	}
+	if !fileExists(filepath.Join(workDir, filepath.FromSlash(target.Install.Launcher))) {
+		return ManagerState{}, fmt.Errorf("%s 安装包缺少启动文件", target.Name)
+	}
+	if err := ctx.Err(); err != nil {
+		return ManagerState{}, err
+	}
+	if err := publishInstallDirectory(workDir, dir); err != nil {
+		return ManagerState{}, err
+	}
+	reportInstallStage(ctx, "验证")
 	for _, st := range DetectManagers(cfg) {
 		if st.ID == id && st.Installed {
 			return st, nil

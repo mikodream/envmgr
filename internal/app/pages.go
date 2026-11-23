@@ -406,10 +406,6 @@ func (a *App) projectConfig(c *ui.Context) {
 			configured = append(configured, kind)
 			continue
 		}
-		if p.Pins[kind] != "" {
-			configured = append(configured, kind)
-			continue
-		}
 		empty = append(empty, kind)
 	}
 
@@ -419,6 +415,14 @@ func (a *App) projectConfig(c *ui.Context) {
 				ui.Text(c, p.Name).FontSize(17).Bold().SingleLine()
 				ui.Text(c, p.Path).FontSize(11).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 			})
+			if job := a.jobFor(projectJobID(p)); job != nil && job.Running {
+				ui.Text(c, "正在就绪 · "+job.Stage).FontSize(11).TextColor(t.TextMuted)
+				if !job.Cancelling && ui.Button(c, "取消就绪").Clicked() {
+					a.cancelJob(job)
+				}
+			} else if ui.PrimaryButton(c, "一键就绪").Clicked() {
+				a.readyProject(p)
+			}
 			if a.button(c, icTerminal, "终端").Label("在终端中打开").Clicked() {
 				a.openTerminal(p)
 			}
@@ -429,6 +433,15 @@ func (a *App) projectConfig(c *ui.Context) {
 				a.confirmDelete = &p
 			}
 		})
+
+		if job := a.jobFor(projectJobID(p)); job != nil {
+			a.card(c).Children(func() { a.jobRow(c, job) })
+		}
+		for _, r := range res {
+			if r.Err != nil {
+				ui.Text(c, "项目配置错误："+r.Err.Error()).TextColor(t.Danger).Wrap()
+			}
+		}
 
 		// Three columns: the SDKs this project actually uses.
 		if len(configured) > 0 {
@@ -486,10 +499,18 @@ func (a *App) projectConfig(c *ui.Context) {
 				if ui.Button(c, "").Padding(2, 8).Children(func() {
 					ui.Text(c, "复制命令").FontSize(11).TextColor(t.TextMuted)
 				}).Label("复制激活命令").Clicked() {
-					c.WriteClipboard(env.Export(core.CurrentShell()))
-					c.Toast("已复制激活命令，粘贴到终端即可进入该项目的环境")
+					if err := env.Validate(); err != nil {
+						a.pushToast("项目环境尚未就绪：" + err.Error())
+					} else {
+						c.WriteClipboard(env.Export(core.CurrentShell()))
+						c.Toast("已复制激活命令，粘贴到终端即可进入该项目的环境")
+					}
 				}
 			})
+			if err := env.Validate(); err != nil {
+				ui.Text(c, err.Error()).FontSize(11).TextColor(t.Danger).Wrap()
+				return
+			}
 			if env.Empty() {
 				ui.Text(c, "没有需要注入的变量：这个项目还没有可用的 SDK 版本。").
 					FontSize(11).TextColor(t.TextMuted).Wrap()
@@ -568,7 +589,7 @@ func (a *App) kindCard(c *ui.Context, p core.Project, kind core.Kind, r core.Res
 		if len(a.pinBuf) == len(core.Kinds) {
 			a.pinBuf[idx] = options[0]
 			for i, v := range values {
-				if v != "" && v == p.Pins[kind] {
+				if v != "" && r.Source == "pin" && v == r.Expr {
 					a.pinBuf[idx] = options[i]
 				}
 			}
@@ -701,6 +722,7 @@ func (a *App) installedRow(c *ui.Context, inst core.Installed) {
 		case "envmgr", "rustup":
 			if a.iconButton(c, icTrash, "删除该版本", true).Clicked() {
 				a.confirmRemove = &inst
+				a.confirmRemoveUsers = a.svc.VersionUsers(inst.Kind, inst.Version)
 			}
 		case core.ManualManager:
 			// EnvMgr did not create this directory, so the most it can do is
@@ -746,6 +768,11 @@ func (a *App) managerRow(c *ui.Context, m core.ManagerState) {
 			if a.iconButton(c, icFolder, "打开目录", false).Clicked() && m.Home != "" {
 				openPath(m.Home)
 			}
+		} else if job := a.jobFor("manager:" + m.ID); job != nil && job.Running {
+			ui.Text(c, job.Stage).FontSize(11).TextColor(t.TextMuted)
+			if !job.Cancelling && ui.Button(c, "取消").Label("取消 "+job.Label).Clicked() {
+				a.cancelJob(job)
+			}
 		} else if m.Install != nil {
 			if ui.Button(c, "安装").Label("安装 " + m.Name).Clicked() {
 				a.installManager(m)
@@ -770,6 +797,7 @@ func (a *App) downloadsPage(c *ui.Context) {
 	a.ensureRemote(kind)
 
 	ui.Column(c).Fill().Padding(20, 20, 22, 20).Gap(12).Children(func() {
+		a.downloadJobs(c)
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Segmented(c, &a.downloadKind, kindNames()...).Label("SDK 类型")
 			ui.Spacer(c)
