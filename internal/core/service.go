@@ -72,6 +72,9 @@ func NewFastService() (*Service, error) {
 }
 
 func newService(store *Store) *Service {
+	// Downloads from this process follow the saved proxy and mirror settings
+	// from the first request onwards.
+	ApplyNetworkConfig(store.ConfigCopy())
 	return &Service{
 		store: store, catalog: NewCatalog(),
 		gitCache:   map[string]gitCacheEntry{},
@@ -527,6 +530,7 @@ func (s *Service) SetConfig(cfg Config) error {
 	if err := s.store.Update(func(st *Store) { st.Config = cfg }); err != nil {
 		return err
 	}
+	ApplyNetworkConfig(cfg)
 	s.Refresh()
 	return nil
 }

@@ -496,11 +496,24 @@ func checkSettings(svc *Service, put putFunc) {
 		put(secSettings, Check{Title: "SDK 目录", Detail: "默认的 ~/.envmgr/sdk", Level: LevelOK})
 	}
 
-	mirror := cfg.NodeMirror
-	if mirror == "" {
-		mirror = "https://nodejs.org/dist（默认）"
+	proxy := ProxyLabel(cfg.Proxy)
+	if cfg.Proxy != "" && cfg.Proxy != ProxyDirect {
+		proxy += " " + cfg.Proxy
 	}
-	put(secSettings, Check{Title: "Node 镜像", Detail: mirror, Level: LevelOK})
+	put(secSettings, Check{Title: "下载代理", Detail: proxy, Level: LevelOK})
+
+	for _, m := range cfg.MirrorSummaries() {
+		where := m.Base
+		switch {
+		case where == "":
+			where = m.Default + "（官方）"
+		case m.Preset != "":
+			where += "（" + m.Preset + " 镜像）"
+		default:
+			where += "（自定义）"
+		}
+		put(secSettings, Check{Title: Info(m.Kind).Name + " 下载源", Detail: where, Level: LevelOK})
+	}
 
 	// A stale global variable is a real trap: it points at a directory that no
 	// longer exists, and every tool started outside a project inherits the

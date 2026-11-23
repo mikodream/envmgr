@@ -354,7 +354,6 @@ func (a *App) openTerminal(p core.Project) {
 func (a *App) saveSettings() {
 	cfg := a.svc.Config()
 	cfg.DataDir = a.dataDir
-	cfg.NodeMirror = a.nodeMirror
 	cfg.Theme = a.themeMode
 	cfg.FollowMarkers = a.followMark
 	cfg.ShellHook = a.shellHook

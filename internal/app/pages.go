@@ -1478,13 +1478,6 @@ func (a *App) settingsPage(c *ui.Context) {
 				ui.Text(c, "留空则使用 ~/.envmgr/sdk。EnvMgr 只会写这里，不动系统 PATH。").
 					FontSize(10.5).TextColor(t.TextMuted)
 			})
-			ui.Column(c).Gap(4).Children(func() {
-				ui.Text(c, "Node 镜像").FontSize(12)
-				ui.TextInput(c, &a.nodeMirror).Label("Node 镜像").
-					Placeholder("https://nodejs.org/dist")
-				ui.Text(c, "例如 https://registry.npmmirror.com/-/binary/node，下载 Node 时优先使用。").
-					FontSize(10.5).TextColor(t.TextMuted)
-			})
 			ui.Row(c).Gap(8).Children(func() {
 				if ui.PrimaryButton(c, "保存").Clicked() {
 					a.saveSettings()
@@ -1497,6 +1490,9 @@ func (a *App) settingsPage(c *ui.Context) {
 				}
 			})
 		})
+
+		// Network: where downloads come from and how they get there.
+		a.networkCard(c)
 
 		// Shell integration
 		sh := a.card(c).Gap(10)

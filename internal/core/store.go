@@ -253,8 +253,14 @@ func (s *Store) ManualCopy() []ManualInstall {
 type Config struct {
 	// DataDir holds downloads and EnvMgr-managed SDKs. Empty means default.
 	DataDir string `json:"dataDir"`
-	// NodeMirror is a base URL replacing https://nodejs.org/dist.
-	NodeMirror string `json:"nodeMirror"`
+	// NodeMirror is where the Node base URL used to live. It is still read for
+	// compatibility; Mirrors is the one place new settings are written.
+	NodeMirror string `json:"nodeMirror,omitempty"`
+	// Mirrors maps an SDK name to a base URL that replaces the vendor's own,
+	// for example "node": "https://npmmirror.com/mirrors/node".
+	Mirrors map[string]string `json:"mirrors,omitempty"`
+	// Proxy is "auto" (follow the environment), "direct" or a proxy URL.
+	Proxy string `json:"proxy,omitempty"`
 	// Theme is "system", "light" or "dark".
 	Theme string `json:"theme"`
 	// Language is "zh" or "en".
@@ -507,6 +513,13 @@ func (s *Store) ConfigCopy() Config {
 			defaults[k] = v
 		}
 		cfg.Defaults = defaults
+	}
+	if cfg.Mirrors != nil {
+		mirrors := make(map[string]string, len(cfg.Mirrors))
+		for k, v := range cfg.Mirrors {
+			mirrors[k] = v
+		}
+		cfg.Mirrors = mirrors
 	}
 	return cfg
 }

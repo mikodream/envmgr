@@ -157,6 +157,7 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 	if err := ctx.Err(); err != nil {
 		return Installed{}, err
 	}
+	ApplyNetworkConfig(cfg)
 	r = resolveChecksum(ctx, r)
 	if !validInstallComponent(r.File) || !validInstallComponent(r.InstallName()) {
 		return Installed{}, fmt.Errorf("安装文件名或版本目录无效")
@@ -311,10 +312,9 @@ type nodeRelease struct {
 }
 
 func (nodeInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.NodeMirror), "/")
-	if base == "" {
-		base = "https://nodejs.org/dist"
-	}
+	// The canonical address; a mirror is applied by the transport, so the
+	// version index, the checksum document and the archive stay consistent.
+	base := "https://nodejs.org/dist"
 	body, err := FetchBytes(ctx, base+"/index.json")
 	if err != nil {
 		return nil, err
@@ -419,6 +419,13 @@ type ghRelease struct {
 const pythonRepo = "astral-sh/python-build-standalone"
 
 func (pythonInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
+	// A GitHub-release mirror keeps the same files in its own directory
+	// layout: <base>/LatestRelease/<file> plus a SHA256SUMS next to them. That
+	// is the only way to install Python when github.com is unreachable, and it
+	// comes with checksums already, so it takes a path of its own.
+	if base := cfg.MirrorBase(Python); base != "" {
+		return pythonMirrorList(ctx, base)
+	}
 	// The GitHub API is rate limited for unauthenticated callers, so read
 	// the release page's asset list instead: it is the same data, served as
 	// HTML, with no quota.
@@ -456,15 +463,63 @@ func (pythonInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
 	return out, nil
 }
 
+// pythonMirrorList reads a GitHub-release mirror instead of github.com. The
+// mirror publishes one directory per release plus a "LatestRelease" alias; the
+// SHA256SUMS file in it lists every asset, so the version list and the digests
+// arrive in a single request.
+func pythonMirrorList(ctx context.Context, base string) ([]Remote, error) {
+	dirs := []string{base + "/LatestRelease"}
+	body, err := FetchBytes(ctx, dirs[0]+"/SHA256SUMS")
+	if err != nil {
+		// Some mirrors serve the files at the root instead of an alias.
+		body, err = FetchBytes(ctx, base+"/SHA256SUMS")
+		if err != nil {
+			return nil, err
+		}
+		dirs[0] = base
+	}
+	triple := Triple()
+	suffix := "-" + triple + "-install_only.tar.gz"
+	seen := map[string]bool{}
+	var out []Remote
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		sha, file := fields[0], strings.TrimPrefix(fields[1], "*")
+		if !strings.HasPrefix(file, "cpython-") || !strings.HasSuffix(file, suffix) {
+			continue
+		}
+		// cpython-3.12.4+20240604-aarch64-apple-darwin-install_only.tar.gz
+		rest := strings.TrimSuffix(strings.TrimPrefix(file, "cpython-"), suffix)
+		version, build, ok := strings.Cut(rest, "+")
+		if !ok || seen[version] {
+			continue
+		}
+		seen[version] = true
+		out = append(out, Remote{
+			Kind: Python, Version: version, Label: "standalone",
+			File: file, Note: build,
+			// A literal + in a path is a 404 on these mirrors; the encoded
+			// form is what their own directory listing links to.
+			URL:    dirs[0] + "/" + strings.ReplaceAll(file, "+", "%2B"),
+			SHA256: sha,
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("镜像 %s 里没有 %s 的 Python 构建", base, triple)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return ParseVersion(out[i].Version).Compare(ParseVersion(out[j].Version)) > 0
+	})
+	return out, nil
+}
+
 // githubLatestTag resolves "releases/latest" to its tag without downloading
 // the page.
 func githubLatestTag(ctx context.Context, repo string) (string, error) {
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := httpClientNoRedirect()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://github.com/"+repo+"/releases/latest", nil)
 	if err != nil {
 		return "", err
@@ -759,6 +814,7 @@ func (c *Catalog) List(ctx context.Context, kind Kind, cfg Config, force bool) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	ApplyNetworkConfig(cfg)
 	c.mu.Lock()
 	entry, ok := c.cache[kind]
 	c.mu.Unlock()

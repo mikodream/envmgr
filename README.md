@@ -31,7 +31,7 @@ EnvMgr 的做法：
 | 项目 | 左侧项目列表（可搜索），右侧按 SDK 选版本；卡片上显示每个项目的提交地址（有名字显示名字，没名字显示域名）；Git 卡显示仓库状态、提交身份与远端地址绑定 |
 | 工具链 | 「已装 SDK」按语言查看版本及来源；「版本管理器」独立集中展示管理工具及安装入口 |
 | 下载安装 | 从官方源列版本、下载、校验、安装；Java 多来源可选；LTS 过滤；内联进度 |
-| 设置 | 主题（跟随系统/浅色/深色）、跟随项目文件开关、SDK 安装目录、Node 镜像、shell 钩子片段、Git 地址绑定管理 |
+| 设置 | 主题（跟随系统/浅色/深色）、跟随项目文件开关、SDK 安装目录、下载源与代理、shell 钩子片段、Git 地址绑定管理 |
 
 浅色深色都跟随系统，也可以手动锁定。
 
@@ -200,7 +200,7 @@ envmgr doctor --dir <目录>    # 只看某个目录解析成什么
 | 终端集成 | 当前 shell、每个 profile 的钩子是否安装、是否有 BOM、钩子调用的程序是否还在、进入提示开关、可用终端 |
 | 工具链 | 每种 SDK 发现了几个版本、哪个一种都没有 |
 | 项目 | 每个项目的版本声明能否落地、缺失的具体版本、手动添加的记录 |
-| 设置与环境变量 | 跟随版本文件、SDK 目录、Node 镜像、`GOROOT`/`JAVA_HOME` 等是否指向已消失的目录 |
+| 设置与环境变量 | 跟随版本文件、SDK 目录、下载代理、各 SDK 的下载源、`GOROOT`/`JAVA_HOME` 等是否指向已消失的目录 |
 
 状态分四级：正常、注意、有问题、信息。能自动处理的项目会直接给按钮（安装终端钩子、重新扫描、打开目录），其余只给说明 —— 比如系统环境变量 EnvMgr 不会去改，只把问题指出来。
 
@@ -222,6 +222,10 @@ envmgr list --remote node                # 官方源可装的版本
 envmgr outdated                          # 已装版本 vs 同系列最新、维护截止日期
 envmgr upgrade --pin                     # 升到同系列最新，并改写项目里确切版本
 envmgr install python@3.12.4             # 下载并安装
+envmgr net                               # 看当前的代理与各 SDK 的下载源
+envmgr net python cn                     # Python 改用南京大学镜像
+envmgr net node cn                       # Node 改用 npmmirror
+envmgr net proxy http://127.0.0.1:7890   # 所有下载走本地代理
 envmgr remove node@20.11.1               # 删除 EnvMgr 装的版本
 envmgr remove node@20.11.1 --force       # 项目仍在用这个版本时也删除
 envmgr doctor                            # 每个项目要的版本是否都在本机
@@ -403,6 +407,21 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 
 校验和不一定写在版本索引里：Node、Python、Corretto、Zulu 把它放在单独的文档中，安装时才读取一次；Liberica 的目录接口只给 SHA-1。解包前对不上就删掉缓存里的坏包并报错，不给下次重试留坑。Microsoft 的构建没有可机读的校验和，是唯一不校验的来源。
 
+### 镜像与代理
+
+官方地址在国内经常很慢或连不上。`envmgr net` 把两件事做成正式设置：
+
+| SDK | 内置镜像（`envmgr net <sdk> cn`） | 说明 |
+| --- | --- | --- |
+| Node.js | `npmmirror.com/mirrors/node` | 版本列表、校验和与压缩包都来自镜像 |
+| Python | 南京大学 github-release 镜像 | GitHub 直连不通时唯一可行的安装途径；版本列表直接读镜像的 SHA256SUMS |
+| Go | `golang.google.cn/dl` | 版本索引走镜像，压缩包从 Google CDN 拉 |
+| Rust | `rsproxy.cn` | rustup 的 dist 与 channel 清单都走镜像 |
+
+Java 没有内置镜像：各家的下载接口格式不同（Adoptium 的 `/v3/assets`、Azul 的包记录、BelSoft 的目录），国内镜像也不代理这些 API，硬编码只会给出坏链接。下载慢时给 EnvMgr 一个代理，它覆盖所有来源：`envmgr net proxy http://127.0.0.1:7890`（`auto` 跟随系统环境变量，`direct` 直连）。代理与镜像对版本列表、校验和文档和压缩包同样生效；设置页的「下载源与代理」卡片改的是同一份配置。
+
+镜像只在设置里保存一个基础地址，改写发生在发请求的时候：Node 的 `nodejs.org/dist`、Go 的 `go.dev/dl`、Rust 的 `static.rust-lang.org` 被替换成镜像地址，跳转后的真实下载地址不再改写。Python 是例外，镜像的目录布局和 GitHub 不同，列表逻辑单独走镜像的 `SHA256SUMS`。
+
 版本表达式支持 `20.11.1`、`20`、`20.x`、`^18`、`~1.2`、`>=18 <21`、`18 || 20`、`lts`。
 
 ## 验证方式
@@ -413,6 +432,7 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 - `go test ./internal/core/` —— 版本比较与匹配、标记文件解析、PATH 覆盖与去重、zip-slip 防护、解包展平、项目内 pin 优先于标记文件、`LookPath` 优先使用覆盖后的 PATH。
 - 目录继承、部分生效与删除保护：`go test ./internal/core -run 'NearestProject|EnvForSubdirectory|FastService|RemoveRefuses' -count=1` 在临时 HOME 里验证向上查找、子目录自有声明优先、缺失版本不拖垮已解析的 SDK、快照复用与过期重扫，以及删除仍被项目使用的版本会被拒绝、只有 `RemoveForced` 才真正删掉；`go test ./internal/cli -run 'ResolvedSDKs' -count=1` 从命令行再验证一次根目录与子目录导出同一份环境。
 - 更新与维护状态：`go test ./internal/core -run 'LineOf|CycleFor|EOLState|BuildUpdates|ParseLifecycle|LineTarget|RepinExact' -count=1` 覆盖发布线的划分（Node/Java 按大版本、Python/Go 按次版本、Rust 按 1.x）、日程记录的最长前缀匹配、`eol: false` 表示仍在维护、预发布版不会成为升级目标、同系列之外不推荐升级，以及 `--pin` 只改写确切版本、不碰 `20` 这类前缀。`go test ./internal/cli -run 'Pad|Labels|UpgradeTargets' -count=1` 守住中文列宽对齐与无参数时的目标筛选。
+- 镜像与代理：`go test ./internal/core -run 'RewriteMirror|MirrorBase|NormalizeProxy|MirrorSummaries|NodeListGoesThrough|PythonMirrorList' -count=1` 验证前缀改写（整段前缀、最长优先、不改跳转目标）、旧版 `nodeMirror` 字段兼容、代理写法归一化（裸 `127.0.0.1:7890` 也接受）、Node 列表的列表/校验和/压缩包三个地址都落到镜像，以及 Python 镜像从 SHA256SUMS 解析版本与摘要、`+` 必须编码成 `%2B`。`go test ./internal/cli -run 'NetCommand|NetProxy' -count=1` 从命令行切换镜像、自定义地址、代理与恢复默认。
 - `go test ./internal/core/` 里还有一组**真 git** 测试：临时仓库里跑 `git init`、写项目级 `user.name`/`user.email`、读回来、清空再确认回退到全局；用 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` 指向临时文件，绝不读写本机真实的 `~/.gitconfig`。
 - 控件几何回归：`go test ./internal/app -run 'SelectChevron|IconButtonGlyph|PinPickerKeeps' -count=1` 把渲染出的位图按触发条区域取墨迹包围盒，断言下拉箭头垂直居中于触发条（误差 ≤1.5 DIP）、右端距边缘 10–14 DIP、尺寸不超过 16×16，以及只有图标的按钮（打开目录、打开官网、复制路径、删除）里图标居中于 28×28 按钮（误差 ≤1 DIP）。换回旧的 `⌄` 字形箭头会让箭头中心比触发条低 4.9 DIP，换回带文字内边距的图标按钮会得到 30×28 而不是正方形，两种情况测试都会失败。
 - `go vet ./...`、`gofmt -l` 干净。

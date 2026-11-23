@@ -180,10 +180,15 @@ type App struct {
 
 	// Settings page.
 	dataDir    string
-	nodeMirror string
 	themeMode  string
 	followMark bool
 	shellHook  bool
+
+	// Network settings, edited as drafts and written by saveNetwork.
+	proxyMode    int
+	proxyURL     string
+	mirrorChoice map[core.Kind]string
+	mirrorURL    map[core.Kind]*string
 
 	// Dialog state.
 	confirmRemove *core.Installed
@@ -226,10 +231,10 @@ func New(svc *core.Service) *App {
 		updates:     map[string]core.Update{}}
 	cfg := svc.Config()
 	a.dataDir = cfg.DataDir
-	a.nodeMirror = cfg.NodeMirror
 	a.themeMode = cfg.Theme
 	a.followMark = cfg.FollowMarkers
 	a.shellHook = cfg.ShellHook
+	a.loadNetwork(cfg)
 	a.syncAndRecompute()
 	a.settings = loadSettingsSnapshot(svc)
 	return a

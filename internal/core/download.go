@@ -23,10 +23,13 @@ import (
 // Progress reports bytes received out of the total, -1 when unknown.
 type Progress func(done, total int64)
 
-// HTTPClient is the client every request uses. It follows the system proxy
-// through the environment, and has a generous timeout because SDK archives
-// are large.
+// HTTPClient is the client every request uses. It carries the proxy and mirror
+// settings last applied, and has a generous timeout because SDK archives are
+// large.
 func HTTPClient() *http.Client {
+	if s := netActive.Load(); s != nil {
+		return s.client
+	}
 	return &http.Client{Timeout: 30 * time.Minute}
 }
 

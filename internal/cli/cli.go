@@ -29,6 +29,7 @@ var commands = []struct {
 	{"remove", "删除 EnvMgr 安装的版本"},
 	{"doctor", "检查项目要的版本是否都在本机"},
 	{"hook", "打印可选安装的 shell 钩子"},
+	{"net", "查看或修改下载源与代理"},
 	{"git", "查看或初始化项目的 Git 仓库与提交身份"}, {"add", "把一个目录加入项目列表"},
 	{"scan", "在目录下查找项目"},
 	{"add-version", "手动登记一个已安装的版本"},
@@ -75,6 +76,14 @@ func PrintUsage(w io.Writer) {
   envmgr default                  看当前的全局默认版本
   envmgr default --unset node     取消 Node 的默认版本
   envmgr list --remote node       看看能装哪些 Node 版本
+  envmgr net                      看当前的代理与各 SDK 的下载源
+  envmgr net node cn              Node 改用 npmmirror 国内镜像
+  envmgr net python cn            Python 改用南京大学镜像
+  envmgr net go cn                Go 改用 golang.google.cn
+  envmgr net rust cn              Rust 改用 rsproxy.cn
+  envmgr net node default         改回官方源
+  envmgr net proxy http://127.0.0.1:7890
+                                  给所有下载走本地代理（auto 跟随系统，direct 直连）
   envmgr outdated                 看哪些版本落后了、哪些系列已停止维护
   envmgr upgrade --pin            升到同系列最新，并改写项目里的确切版本
   envmgr install python@3.12.4    安装 Python 3.12.4
@@ -145,6 +154,8 @@ func Run(args []string) int {
 		return cmdDoctor(svc, args[1:])
 	case "hook":
 		return cmdHook(svc, args[1:])
+	case "net":
+		return cmdNet(svc, args[1:])
 	case "git":
 		return cmdGit(svc, args[1:])
 	case "add":

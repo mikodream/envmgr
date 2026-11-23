@@ -591,10 +591,8 @@ func resolveDownload(ctx context.Context, url string) (string, int64, error) {
 	}
 	req.Header.Set("Range", "bytes=0-0")
 	req.Header.Set("User-Agent", userAgent())
-	client := &http.Client{
-		// Stop at the first response: the body of a JDK archive is not needed.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	// Stop at the first response: the body of a JDK archive is not needed.
+	client := httpClientNoRedirect()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", 0, err

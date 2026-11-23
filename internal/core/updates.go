@@ -446,6 +446,7 @@ func saveLifecycleCache(file lifecycleFile) {
 // failure is normal offline: the kinds that answered are returned, and the
 // error says why the rest are missing.
 func (s *Service) Lifecycles(ctx context.Context, force bool) (map[Kind][]Cycle, error) {
+	ApplyNetworkConfig(s.Config())
 	cache := loadLifecycleCache()
 	out := map[Kind][]Cycle{}
 	for name, rec := range cache.Kinds {
