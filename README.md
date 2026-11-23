@@ -357,11 +357,13 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 | SDK | 发现 | 下载安装 |
 | --- | --- | --- |
 | Node.js | envmgr、nvm、nvm-windows、fnm、n、volta、asdf、mise、PATH | nodejs.org/dist（可换镜像），带 SHASUMS256 校验 |
-| Python | envmgr、pyenv、uv、asdf、mise、PATH | python-build-standalone 官方 release |
-| Java | envmgr、jenv、sdkman、asdf、mise、JAVA_HOME、系统目录 | Eclipse Temurin、Amazon Corretto、Azul Zulu、BellSoft Liberica、Microsoft Build of OpenJDK |
-| Go | envmgr、`~/sdk`、GOROOT、asdf、mise | go.dev/dl |
+| Python | envmgr、pyenv、uv、asdf、mise、PATH | python-build-standalone 官方 release，带 SHA256SUMS 校验 |
+| Java | envmgr、jenv、sdkman、asdf、mise、JAVA_HOME、系统目录 | Eclipse Temurin、Amazon Corretto、Azul Zulu、BellSoft Liberica、Microsoft Build of OpenJDK，前四家带校验（SHA-256，Liberica 为 SHA-1） |
+| Go | envmgr、`~/sdk`、GOROOT、asdf、mise | go.dev/dl，索引自带 SHA-256 |
 | Rust | envmgr、rustup、asdf、mise、PATH | 通过私有 `RUSTUP_HOME` 装 rustup |
 | Ruby | envmgr、rbenv、rvm、asdf、mise、系统目录 | 仅发现与导入（官方无免编译二进制） |
+
+校验和不一定写在版本索引里：Node、Python、Corretto、Zulu 把它放在单独的文档中，安装时才读取一次；Liberica 的目录接口只给 SHA-1。解包前对不上就删掉缓存里的坏包并报错，不给下次重试留坑。Microsoft 的构建没有可机读的校验和，是唯一不校验的来源。
 
 版本表达式支持 `20.11.1`、`20`、`20.x`、`^18`、`~1.2`、`>=18 <21`、`18 || 20`、`lts`。
 

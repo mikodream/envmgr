@@ -246,7 +246,8 @@ func correttoRelease(ctx context.Context, p platform, major int) ([]Remote, erro
 	if osName == "" || arch == "" {
 		return nil, fmt.Errorf("Corretto 不支持 %s/%s", p.goos, p.goar)
 	}
-	url := fmt.Sprintf("https://corretto.aws/downloads/latest/amazon-corretto-%d-%s-%s-jdk.zip", major, arch, osName)
+	url := fmt.Sprintf("https://corretto.aws/downloads/latest/amazon-corretto-%d-%s-%s-jdk.%s",
+		major, arch, osName, correttoExt(p.goos))
 	final, size, err := resolveDownload(ctx, url)
 	if err != nil {
 		return nil, err
@@ -260,7 +261,30 @@ func correttoRelease(ctx context.Context, p platform, major int) ([]Remote, erro
 		Kind: Java, Version: version, Vendor: "corretto", VendorName: JavaVendorName("corretto"),
 		Label: javaLabel(major), LTS: isJavaLTS(major),
 		Size: size, URL: final, File: archiveName(final),
+		// Corretto serves digests under latest_sha256, at the same path the
+		// download uses. It must be read now: the versioned resource path
+		// itself refuses .sha256 requests.
+		SHA256: correttoDigest(ctx, url),
 	}}, nil
+}
+
+// correttoExt is the archive type Corretto publishes for an OS. Only Windows
+// ships a zip; the other platforms serve tar.gz and answer 404 for a zip.
+func correttoExt(goos string) string {
+	if goos == "windows" {
+		return "zip"
+	}
+	return "tar.gz"
+}
+
+// correttoDigest reads the checksum that belongs to the build `latest` points
+// at right now. An unreachable document leaves the build unverified.
+func correttoDigest(ctx context.Context, latestURL string) string {
+	body, err := FetchBytes(ctx, strings.Replace(latestURL, "/downloads/latest/", "/downloads/latest_sha256/", 1))
+	if err != nil {
+		return ""
+	}
+	return digestFromDocument(body, "", "")
 }
 
 var correttoVerRe = regexp.MustCompile(`amazon-corretto-([0-9]+(?:\.[0-9]+)*)-`)
@@ -281,6 +305,7 @@ type zuluPackage struct {
 	JavaVersion []int  `json:"java_version"`
 	DistroVer   []int  `json:"distro_version"`
 	Product     string `json:"product"`
+	PackageUUID string `json:"package_uuid"`
 }
 
 // zuluReleases reads Azul's metadata API. It returns one entry per build, with
@@ -319,6 +344,9 @@ func zuluReleases(ctx context.Context, p platform, major int) ([]Remote, error) 
 			Kind: Java, Version: version, Vendor: "zulu", VendorName: JavaVendorName("zulu"),
 			Label: javaLabel(major), LTS: isJavaLTS(major),
 			URL: pkg.DownloadURL, File: archiveName(pkg.DownloadURL),
+			// The list endpoint omits digests; the package record has them.
+			// Asking per build at install time costs one small request.
+			ChecksumURL: zuluPackageURL(pkg.PackageUUID),
 		}
 	}
 	out := make([]Remote, 0, len(byVersion))
@@ -326,6 +354,15 @@ func zuluReleases(ctx context.Context, p platform, major int) ([]Remote, error) 
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// zuluPackageURL is the metadata record of one package, which carries the
+// sha256_hash the list endpoint leaves out.
+func zuluPackageURL(uuid string) string {
+	if uuid == "" {
+		return ""
+	}
+	return "https://api.azul.com/metadata/v1/zulu/packages/" + uuid
 }
 
 // isPlainZuluJDK rejects the CRaC and JavaFX flavours, and the source bundles.
@@ -360,6 +397,8 @@ type libericaRelease struct {
 	Size         int64  `json:"size"`
 	LTS          bool   `json:"LTS"`
 	Latest       bool   `json:"latest"`
+	// BellSoft publishes SHA-1 only, in the catalogue response itself.
+	SHA1 string `json:"sha1"`
 }
 
 // libericaReleases reads BellSoft's catalogue. The API rejects unknown query
@@ -397,6 +436,7 @@ func libericaReleases(ctx context.Context, p platform, major int) ([]Remote, err
 			Kind: Java, Version: version, Vendor: "liberica", VendorName: JavaVendorName("liberica"),
 			Label: javaLabel(major), LTS: isJavaLTS(major),
 			Size: rel.Size, URL: rel.DownloadURL, File: archiveName(rel.DownloadURL),
+			SHA1: rel.SHA1,
 		}
 	}
 	out := make([]Remote, 0, len(best))
@@ -455,6 +495,8 @@ func microsoftRelease(ctx context.Context, p platform, major int) ([]Remote, err
 		Kind: Java, Version: version, Vendor: "microsoft", VendorName: JavaVendorName("microsoft"),
 		Label: javaLabel(major), LTS: isJavaLTS(major),
 		Size: size, URL: final, File: archiveName(final),
+		// Microsoft publishes no machine-readable digest, so this build is the
+		// one Java source that installs without a checksum.
 	}}, nil
 }
 

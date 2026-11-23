@@ -5,10 +5,12 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -140,7 +142,16 @@ func Download(ctx context.Context, url, dst string, progress Progress) error {
 // VerifySHA256 checks a file against an expected digest, ignoring case and an
 // optional "sha256:" prefix. An empty want means "no check offered".
 func VerifySHA256(path, want string) error {
-	want = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(want), "sha256:")))
+	return verifyDigest(path, "sha256", want)
+}
+
+// VerifySHA1 is the same check for the one source that only publishes SHA-1.
+func VerifySHA1(path, want string) error {
+	return verifyDigest(path, "sha1", want)
+}
+
+func verifyDigest(path, algo, want string) error {
+	want = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(want), algo+":")))
 	if want == "" {
 		return nil
 	}
@@ -149,15 +160,36 @@ func VerifySHA256(path, want string) error {
 		return err
 	}
 	defer f.Close()
-	h := sha256.New()
+	var h hash.Hash
+	switch algo {
+	case "sha1":
+		h = sha1.New()
+	default:
+		h = sha256.New()
+	}
 	if _, err := io.Copy(h, f); err != nil {
 		return err
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if got != want {
-		return fmt.Errorf("校验失败：期望 %s，实际 %s", want[:12], got[:12])
+		return fmt.Errorf("校验失败（%s）：期望 %s，实际 %s", strings.ToUpper(algo), want[:12], got[:12])
 	}
 	return nil
+}
+
+// isHexDigest reports whether s is a hex digest of exactly n characters.
+func isHexDigest(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Extract unpacks an archive into dst, choosing the format by extension.

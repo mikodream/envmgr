@@ -33,6 +33,14 @@ type Remote struct {
 	Size   int64  `json:"size,omitempty"`
 	URL    string `json:"-"`
 	SHA256 string `json:"-"`
+	// SHA1 is the digest BellSoft publishes for Liberica; every other source
+	// ships SHA-256. A build without either installs unverified.
+	SHA1 string `json:"-"`
+	// ChecksumURL answers with the digest of this exact build. Sources that
+	// only reveal digests in a separate document (nodejs.org, python-build-
+	// standalone, Corretto, Zulu) point here and the pipeline reads it just
+	// before verifying, so listing versions stays cheap.
+	ChecksumURL string `json:"-"`
 	// File is the archive's name, used for the download cache.
 	File string `json:"-"`
 	// Note carries what the feed says, e.g. the release date.
@@ -89,6 +97,58 @@ func installPath(cfg Config, kind Kind, version string) (string, error) {
 	return filepath.Join(root, string(kind), version), nil
 }
 
+// verifyArchive checks every digest the source published for this build. A
+// source that publishes none still installs: HTTPS protects the transport, and
+// refusing every artifact from it would be worse than the missing check.
+func verifyArchive(r Remote, archive string) error {
+	if err := VerifySHA256(archive, r.SHA256); err != nil {
+		return err
+	}
+	return VerifySHA1(archive, r.SHA1)
+}
+
+// resolveChecksum reads the digest a source only publishes as a separate
+// document. It is best effort: a document that cannot be fetched leaves the
+// build unverified rather than failing an otherwise valid install.
+func resolveChecksum(ctx context.Context, r Remote) Remote {
+	if r.SHA256 != "" || r.SHA1 != "" || r.ChecksumURL == "" {
+		return r
+	}
+	body, err := FetchBytes(ctx, r.ChecksumURL)
+	if err != nil {
+		return r
+	}
+	r.SHA256 = digestFromDocument(body, r.File, r.URL)
+	return r
+}
+
+// digestFromDocument reads a digest out of the three shapes sources use: a
+// JSON package record (Azul), a checksum listing such as SHA256SUMS
+// ("<digest>  <file>"), or a bare digest (Corretto).
+func digestFromDocument(body []byte, file, sourceURL string) string {
+	var record struct {
+		SHA256      string `json:"sha256_hash"`
+		DownloadURL string `json:"download_url"`
+	}
+	if json.Unmarshal(body, &record) == nil && isHexDigest(record.SHA256, 64) {
+		// The record must describe the build being installed, not a sibling
+		// package that happens to sit under the same id.
+		if record.DownloadURL == "" || record.DownloadURL == sourceURL {
+			return strings.ToLower(record.SHA256)
+		}
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && isHexDigest(fields[0], 64) && strings.TrimPrefix(fields[1], "*") == file {
+			return strings.ToLower(fields[0])
+		}
+	}
+	if only := strings.TrimSpace(string(body)); isHexDigest(only, 64) {
+		return strings.ToLower(only)
+	}
+	return ""
+}
+
 // installArchive runs the whole pipeline: download to the cache, check the
 // digest, unpack into a temporary directory beside the destination, tidy the
 // layout, then move it into place in one rename. A half-unpacked SDK never
@@ -97,6 +157,7 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 	if err := ctx.Err(); err != nil {
 		return Installed{}, err
 	}
+	r = resolveChecksum(ctx, r)
 	if !validInstallComponent(r.File) || !validInstallComponent(r.InstallName()) {
 		return Installed{}, fmt.Errorf("安装文件名或版本目录无效")
 	}
@@ -125,7 +186,7 @@ func installArchive(ctx context.Context, cfg Config, kind Kind, r Remote, progre
 		return Installed{}, err
 	}
 	reportInstallStage(ctx, "校验")
-	if err := VerifySHA256(archive, r.SHA256); err != nil {
+	if err := verifyArchive(r, archive); err != nil {
 		// A corrupt archive would fail again on the next try.
 		_ = os.Remove(archive)
 		return Installed{}, err
@@ -276,12 +337,18 @@ func (nodeInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
 		if name, ok := rel.LTS.(string); ok && name != "" {
 			label = "LTS · " + name
 		}
+		file := nodeFileName(version, p)
+		dir := base + "/v" + version
 		out = append(out, Remote{
 			Kind: Node, Version: version, Label: label,
 			LTS:  label != "Current",
-			File: nodeFileName(version, p),
-			URL:  base + "/v" + version + "/" + nodeFileName(version, p),
-			Note: rel.Date,
+			File: file,
+			URL:  dir + "/" + file,
+			// nodejs.org publishes SHA256SUMS.txt beside every build, and a
+			// mirror is expected to carry the same file. Reading it at install
+			// time keeps the version list to a single request.
+			ChecksumURL: dir + "/SHASUMS256.txt",
+			Note:        rel.Date,
 		})
 	}
 	return out, nil
@@ -325,20 +392,8 @@ func nodeFileName(version string, p platform) string {
 }
 
 func (n nodeInstaller) Fetch(ctx context.Context, r Remote, cfg Config, progress Progress) (Installed, error) {
-	// Node publishes digests next to the archive; verifying costs one small
-	// request and catches a truncated mirror.
-	if r.SHA256 == "" {
-		base := strings.TrimSuffix(r.URL, "/"+r.File)
-		if body, err := FetchBytes(ctx, base+"/SHASUMS256.txt"); err == nil {
-			for _, line := range strings.Split(string(body), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == r.File {
-					r.SHA256 = fields[0]
-					break
-				}
-			}
-		}
-	}
+	// installArchive reads SHASUMS256.txt through r.ChecksumURL, so a
+	// truncated mirror is caught before anything is unpacked.
 	return installArchive(ctx, cfg, Node, r, progress, nil)
 }
 
@@ -386,10 +441,13 @@ func (pythonInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
 			continue
 		}
 		seen[version] = true
+		dir := "https://github.com/" + pythonRepo + "/releases/download/" + tag
 		out = append(out, Remote{
 			Kind: Python, Version: version, Label: "standalone",
 			File: file, Note: tag,
-			URL: "https://github.com/" + pythonRepo + "/releases/download/" + tag + "/" + file,
+			URL: dir + "/" + file,
+			// Every release carries a SHA256SUMS file next to its archives.
+			ChecksumURL: dir + "/SHA256SUMS",
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
