@@ -78,11 +78,14 @@ type App struct {
 	installed []core.Installed
 	inventory inventoryView
 	settings  settingsSnapshot
-	doctor    doctorView
-	projects  []core.Project
-	managers  []core.ManagerState
-	syncedAt  string
-	syncing   bool
+	// defaults is the global fallback per SDK, read with the snapshot so the
+	// settings page never touches the store while drawing.
+	defaults map[core.Kind]string
+	doctor   doctorView
+	projects []core.Project
+	managers []core.ManagerState
+	syncedAt string
+	syncing  bool
 
 	// Projects page.
 	projectQuery string
@@ -416,6 +419,7 @@ func (a *App) syncNow() {
 	a.inventory = buildInventoryView(a.installed)
 	a.projects = a.svc.Projects()
 	a.managers = a.svc.Managers()
+	a.defaults = a.svc.Defaults()
 	a.syncedAt = nowLabel()
 }
 

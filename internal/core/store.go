@@ -263,6 +263,9 @@ type Config struct {
 	ShellHook bool `json:"shellHook"`
 	// FollowMarkers makes projects without an explicit pin follow .nvmrc etc.
 	FollowMarkers bool `json:"followMarkers"`
+	// Defaults is the version each SDK falls back to where a directory says
+	// nothing, keyed by kind. Without it EnvMgr is silent outside projects.
+	Defaults map[string]string `json:"defaults,omitempty"`
 	// ScanRoots are extra directories to look for projects in.
 	ScanRoots []string `json:"scanRoots"`
 }
@@ -498,6 +501,13 @@ func (s *Store) ConfigCopy() Config {
 	_ = s.reloadLocked()
 	cfg := s.Config
 	cfg.ScanRoots = append([]string(nil), cfg.ScanRoots...)
+	if cfg.Defaults != nil {
+		defaults := make(map[string]string, len(cfg.Defaults))
+		for k, v := range cfg.Defaults {
+			defaults[k] = v
+		}
+		cfg.Defaults = defaults
+	}
 	return cfg
 }
 

@@ -81,7 +81,7 @@ IBM Semeru 与 Oracle 的 OpenJDK 构建没有稳定的公开版本索引（Seme
 
 **项目配置**：列表收缩成左侧窄栏（仍可搜索、仍标注缺失），右侧是该项目自己的配置：
 
-- 三栏卡片，一张卡一个 SDK —— 颜色点、来源（`pin` / `.nvmrc` / `go.mod` 等）、当前解析到的版本与来源管理器、切换下拉。
+- 三栏卡片，一张卡一个 SDK —— 颜色点、来源（`pin` / `.nvmrc` / `go.mod` / `默认` 等）、当前解析到的版本与来源管理器、切换下拉。
 - 这个项目**没用到的** SDK 收在「未配置 N」后面，默认折叠；点「展开」才显示，并且用淡色画出来 —— 它们在本机可用，只是这个项目不关心。
 
 ### 任意子目录都算这个项目
@@ -91,6 +91,12 @@ IBM Semeru 与 Oracle 的 OpenJDK 构建没有稳定的公开版本索引（Seme
 缺失的版本不再让整个环境失效。项目要 Go 1.27.4 和 Java 21.0.9，而只有 Java 装好时，进入目录会切到 Java，并把「缺少 Go 1.27.4」打印在终端；`envmgr run`、终端按钮和一键就绪仍然严格，缺任何一个版本都拒绝启动，避免悄悄用到系统里的另一个版本。
 
 进入项目时读取的是最近一次扫描的快照（`~/.envmgr/discovery.json`，60 秒内有效），所以每次 `cd` 不再重新探测所有 SDK：首次约 200ms，之后通常在 10ms 内。超过 60 秒会重新扫描一次，外部工具刚装的版本也能被看到。
+
+### 项目之外的全局默认版本
+
+离开项目就什么都不切换，是 asdf / mise 用户最先不习惯的地方。设置页的「全局默认版本」可以给每个 SDK 指定一个兜底版本，命令行是 `envmgr default node@20.11.1`：此后没有声明该 SDK 的目录都用它，项目自己写了版本时仍以项目为准。设置值在保存时解析成当时匹配到的确切版本，不会指向一个没装的东西。
+
+那个版本后来被删掉时，默认自动失效，不会在每个目录里报错；`envmgr default` 会把它标成「本机已没有」。删除一个正被默认使用的版本会被拒绝，和仍被项目固定的版本一样，确认后加 `--force`。
 
 ### 项目里的 Git
 
@@ -208,6 +214,9 @@ envmgr env --shell pwsh                  # 打印激活脚本，交给 shell 执
 eval "$(envmgr env)"                     # bash / zsh 里直接生效
 envmgr run -- npm test                   # 用项目的 Node 跑一条命令
 envmgr use node@20.11.1 python@3.12.4    # 固定版本，写入 .envmgr.json
+envmgr default node@20.11.1              # 目录没声明 Node 时默认用它
+envmgr default                           # 看当前的全局默认版本
+envmgr default --unset node              # 取消 Node 的默认版本
 envmgr list                              # 本机已装
 envmgr list --remote node                # 官方源可装的版本
 envmgr install python@3.12.4             # 下载并安装
@@ -226,7 +235,7 @@ envmgr forget-version java ~/env/java/17 # 取消登记（不删磁盘文件）
 
 `envmgr run` 会把命令解析到**项目固定的那个版本**上（先按覆盖后的 PATH 找可执行文件，再启动），退出码原样返回，可以直接放进脚本。
 
-`envmgr env` 在部分版本缺失时仍导出已经解析的 SDK，并把缺失项写到 stderr（退出码 0），这样钩子不会因为一个版本没装而丢掉整个环境；`envmgr run` 保持严格，缺任何一个版本都不启动。`envmgr remove` 默认拒绝删除仍被项目使用的版本并列出这些项目，确认后再加 `--force`。
+`envmgr env` 在部分版本缺失时仍导出已经解析的 SDK，并把缺失项写到 stderr（退出码 0），这样钩子不会因为一个版本没装而丢掉整个环境；`envmgr run` 保持严格，缺任何一个版本都不启动。`envmgr remove` 默认拒绝删除仍被项目使用、或仍是全局默认的版本，确认后再加 `--force`。
 
 ## 项目一键就绪与安装任务
 

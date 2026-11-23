@@ -1265,6 +1265,58 @@ func (a *App) settingsPage(c *ui.Context) {
 			})
 		})
 
+		// Global defaults: the version a directory gets when it says nothing.
+		// Without them EnvMgr only does anything inside projects, and a user
+		// who fixes Java once still meets the system JDK in a scratch folder.
+		defaultsCard := a.card(c).Gap(10)
+		defaultsCard.Children(func() {
+			ui.Text(c, "全局默认版本").FontSize(13).Bold()
+			ui.Text(c, "项目里没有声明版本时使用这里的设置；项目自己写了版本，仍然以项目为准。").
+				FontSize(10.5).TextColor(t.TextMuted).Wrap().MaxWidth(560)
+			anyChoice := false
+			for _, kind := range core.Kinds {
+				list := core.InstalledOf(a.installed, kind)
+				if len(list) == 0 {
+					continue
+				}
+				anyChoice = true
+				kind := kind
+				labels := []string{"不设置"}
+				versions := map[string]string{}
+				for _, inst := range list {
+					label := inst.Version
+					if inst.Manager != "" && inst.Manager != "envmgr" {
+						label += " · " + inst.Manager
+					}
+					if _, dup := versions[label]; dup {
+						continue
+					}
+					versions[label] = inst.Version
+					labels = append(labels, label)
+				}
+				choice := "不设置"
+				if v := a.defaults[kind]; v != "" {
+					for label, version := range versions {
+						if version == v {
+							choice = label
+							break
+						}
+					}
+				}
+				info := core.Info(kind)
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, info.Name).FontSize(12).Width(120).Shrink(0)
+					if ui.Select(c, &choice, labels).Label(info.Name + " 默认版本").Changed() {
+						a.setDefault(kind, versions[choice])
+					}
+				})
+			}
+			if !anyChoice {
+				ui.Text(c, "本机还没有可选的版本，先在「下载安装」里装一个。").
+					FontSize(10.5).TextColor(t.TextMuted)
+			}
+		})
+
 		// Terminal integration: the hook is what makes the user's own
 		// terminals switch versions, not just the one EnvMgr opens.
 		integ := a.card(c).Gap(10)

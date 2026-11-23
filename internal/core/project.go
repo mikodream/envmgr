@@ -318,6 +318,14 @@ type Resolution struct {
 // Resolve works out the environment of a project: explicit pins first, then
 // the marker files of the tools it already uses.
 func Resolve(p Project, installed []Installed, followMarkers bool) []Resolution {
+	return ResolveWithDefaults(p, installed, followMarkers, nil)
+}
+
+// ResolveWithDefaults is Resolve plus the global defaults, which fill in every
+// kind the directory says nothing about. A default whose version is no longer
+// installed is skipped rather than reported missing: a global default is meant
+// to be silently there, not to block every directory on the machine.
+func ResolveWithDefaults(p Project, installed []Installed, followMarkers bool, defaults map[string]string) []Resolution {
 	pins, err := ReadProjectPins(p.Path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return []Resolution{{Source: ConfigFileName, Err: fmt.Errorf("读取 %s: %w", ConfigFileName, err)}}
@@ -342,7 +350,37 @@ func Resolve(p Project, installed []Installed, followMarkers bool) []Resolution 
 		}
 		wanted[kind] = Resolution{Kind: kind, Expr: expr, Source: "pin"}
 	}
+	applyDefaults(wanted, installed, defaults)
+	return resolveWanted(wanted, installed)
+}
 
+// DefaultResolutions is the environment outside any project: only what the
+// user set as global defaults.
+func DefaultResolutions(installed []Installed, defaults map[string]string) []Resolution {
+	wanted := map[Kind]Resolution{}
+	applyDefaults(wanted, installed, defaults)
+	return resolveWanted(wanted, installed)
+}
+
+// applyDefaults adds every kind the directory did not ask for, as long as the
+// default still matches an installed version.
+func applyDefaults(wanted map[Kind]Resolution, installed []Installed, defaults map[string]string) {
+	for _, kind := range Kinds {
+		if _, ok := wanted[kind]; ok {
+			continue
+		}
+		expr := strings.TrimSpace(defaults[string(kind)])
+		if expr == "" {
+			continue
+		}
+		if _, found := Best(installed, kind, expr); !found {
+			continue
+		}
+		wanted[kind] = Resolution{Kind: kind, Expr: expr, Source: "默认"}
+	}
+}
+
+func resolveWanted(wanted map[Kind]Resolution, installed []Installed) []Resolution {
 	out := make([]Resolution, 0, len(wanted))
 	for _, kind := range Kinds {
 		res, ok := wanted[kind]

@@ -21,6 +21,7 @@ var commands = []struct {
 	{"env", "打印当前目录的激活脚本，供 shell eval"},
 	{"run", "在项目环境中运行一条命令"},
 	{"use", "在项目里固定版本，写入 .envmgr.json"},
+	{"default", "设置项目没写版本时使用的全局默认版本"},
 	{"list", "列出已安装的版本，或可下载的版本"},
 	{"install", "从官方源下载并安装一个版本"},
 	{"remove", "删除 EnvMgr 安装的版本"},
@@ -64,6 +65,9 @@ func PrintUsage(w io.Writer) {
   envmgr env --shell pwsh         打印 PowerShell 版本
   envmgr run -- npm test          用项目的 Node 跑测试
   envmgr use node@20.11.1         固定 Node 版本，写入 .envmgr.json
+  envmgr default node@20.11.1     目录里没写 Node 版本时默认用它
+  envmgr default                  看当前的全局默认版本
+  envmgr default --unset node     取消 Node 的默认版本
   envmgr list --remote node       看看能装哪些 Node 版本
   envmgr install python@3.12.4    安装 Python 3.12.4
   envmgr git                      看当前目录的仓库状态与提交身份
@@ -117,6 +121,8 @@ func Run(args []string) int {
 		return cmdRun(svc, args[1:])
 	case "use":
 		return cmdUse(svc, args[1:])
+	case "default":
+		return cmdDefault(svc, args[1:])
 	case "list", "ls":
 		return cmdList(svc, args[1:])
 	case "install", "i":
@@ -312,6 +318,75 @@ func cmdUse(svc *core.Service, args []string) int {
 		return 1
 	}
 	fmt.Printf("已写入 %s\n", filepath.Join(dir, core.ConfigFileName))
+	return 0
+}
+
+// cmdDefault reads or changes the versions used where a directory says
+// nothing. Without one EnvMgr is silent outside projects, which is a strange
+// thing for a shell helper: you fix Java once and it is there everywhere.
+func cmdDefault(svc *core.Service, args []string) int {
+	unset, args := flagValue(args, "unset", "")
+	code := 0
+	attempted := unset != ""
+	if unset != "" {
+		kind, ok := core.ParseKind(unset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "不认识的 SDK: %s\n", unset)
+			return 2
+		}
+		if err := svc.ClearDefault(kind); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Printf("已取消 %s 的全局默认版本\n", core.Info(kind).Name)
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			continue
+		}
+		attempted = true
+		kindName, expr, ok := strings.Cut(arg, "@")
+		if !ok || strings.TrimSpace(expr) == "" {
+			fmt.Fprintln(os.Stderr, "用法: envmgr default node@20.11.1 | --unset node")
+			code = 2
+			continue
+		}
+		kind, ok := core.ParseKind(kindName)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "不认识的 SDK: %s\n", kindName)
+			code = 2
+			continue
+		}
+		if err := svc.SetDefault(kind, expr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+			continue
+		}
+		installed, _ := core.Best(svc.Installed(), kind, expr)
+		fmt.Printf("%s 默认使用 %s（项目里写了版本时仍以项目为准）\n", core.Info(kind).Name, installed.Version)
+	}
+	if attempted {
+		return code
+	}
+
+	defaults := svc.Defaults()
+	installed := svc.Installed()
+	printed := false
+	for _, kind := range core.Kinds {
+		expr := defaults[kind]
+		if expr == "" {
+			continue
+		}
+		printed = true
+		if inst, found := core.Best(installed, kind, expr); found {
+			fmt.Printf("  %-8s %s\n", core.Info(kind).Name, inst.Version)
+		} else {
+			fmt.Printf("  %-8s %s（本机已没有，默认不生效）\n", core.Info(kind).Name, expr)
+		}
+	}
+	if !printed {
+		fmt.Println("还没有全局默认版本。用法: envmgr default node@20.11.1")
+	}
 	return 0
 }
 

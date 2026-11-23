@@ -700,7 +700,7 @@ func (s *Service) Resolve(p Project) []Resolution {
 	if err := s.store.ReadError(); err != nil {
 		return []Resolution{{Source: "state.json", Err: err}}
 	}
-	return Resolve(p, s.Installed(), cfg.FollowMarkers)
+	return ResolveWithDefaults(p, s.Installed(), cfg.FollowMarkers, cfg.Defaults)
 }
 
 // ManualInstalls returns the versions the user added by hand, resolved into
@@ -781,7 +781,9 @@ func (s *Service) EnvFor(p Project) Env {
 
 // EnvForDir resolves a directory that need not be a managed project. It walks
 // up to the closest directory that declares versions, so a shell sitting in
-// src/ gets the same environment as its project root.
+// src/ gets the same environment as its project root. Outside every project the
+// global defaults still apply: that is what makes a terminal useful in a
+// scratch directory.
 func (s *Service) EnvForDir(dir string) Env {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -792,12 +794,51 @@ func (s *Service) EnvForDir(dir string) Env {
 	}
 	root, ok := NearestProjectDir(abs)
 	if !ok {
-		return Env{}
+		cfg := s.Config()
+		return BuildEnv(DefaultResolutions(s.Installed(), cfg.Defaults))
 	}
 	if p, ok := s.store.ProjectByPath(root); ok {
 		return s.EnvFor(p)
 	}
 	return s.EnvFor(NewProject(root))
+}
+
+// Defaults is the global fallback of each SDK, keyed by kind.
+func (s *Service) Defaults() map[Kind]string {
+	out := map[Kind]string{}
+	for name, expr := range s.Config().Defaults {
+		if kind, ok := ParseKind(name); ok && strings.TrimSpace(expr) != "" {
+			out[kind] = expr
+		}
+	}
+	return out
+}
+
+// SetDefault makes a version the fallback for every directory that says
+// nothing about that SDK. The expression is resolved against what is installed
+// now, so a default never points at a version that is not there.
+func (s *Service) SetDefault(kind Kind, expr string) error {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return s.ClearDefault(kind)
+	}
+	inst, found := Best(s.Installed(), kind, expr)
+	if !found {
+		return fmt.Errorf("本机没有匹配 %s %s 的版本", Info(kind).Name, expr)
+	}
+	return s.store.Update(func(st *Store) {
+		if st.Config.Defaults == nil {
+			st.Config.Defaults = map[string]string{}
+		}
+		st.Config.Defaults[string(kind)] = inst.Version
+	})
+}
+
+// ClearDefault removes the fallback of one SDK.
+func (s *Service) ClearDefault(kind Kind) error {
+	return s.store.Update(func(st *Store) {
+		delete(st.Config.Defaults, string(kind))
+	})
 }
 
 // ListRemote returns the downloadable versions of a kind.
@@ -837,11 +878,14 @@ func (e *VersionInUseError) Error() string {
 
 // VersionUsers lists the projects whose current environment resolves to
 // kind@version. It is the reverse index behind the delete guard and answers
-// "who still needs this version".
+// "who still needs this version". Global defaults are not projects: deleting
+// the fallback version is its own, separate check.
 func (s *Service) VersionUsers(kind Kind, version string) []Project {
 	var users []Project
+	cfg := s.Config()
+	installed := s.Installed()
 	for _, p := range s.Projects() {
-		for _, r := range s.Resolve(p) {
+		for _, r := range Resolve(p, installed, cfg.FollowMarkers) {
 			if r.Installed != nil && r.Kind == kind && r.Installed.Version == version {
 				users = append(users, p)
 				break
@@ -865,6 +909,14 @@ func (s *Service) remove(inst Installed, force bool) error {
 	if !force {
 		if users := s.VersionUsers(inst.Kind, inst.Version); len(users) > 0 {
 			return &VersionInUseError{Kind: inst.Kind, Version: inst.Version, Projects: users}
+		}
+		// A global default is not a project, but deleting the version behind
+		// it would quietly change every directory on the machine at once.
+		if expr := strings.TrimSpace(s.Config().Defaults[string(inst.Kind)]); expr != "" {
+			if match, found := Best([]Installed{inst}, inst.Kind, expr); found && match.Version == inst.Version {
+				return fmt.Errorf("%s 是 %s 的全局默认版本。先运行 envmgr default --unset %s，或加 --force 确认删除。",
+					inst.ID(), Info(inst.Kind).Name, inst.Kind)
+			}
 		}
 	}
 	if inst.Manager != "envmgr" && inst.Manager != "rustup" {

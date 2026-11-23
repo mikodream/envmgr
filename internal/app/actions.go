@@ -365,6 +365,28 @@ func (a *App) saveSettings() {
 	a.syncAndRecompute()
 }
 
+// setDefault changes the version a directory gets when it says nothing.
+// Already-open terminals pick it up on their next directory change, because
+// the hook asks EnvMgr for the environment each time.
+func (a *App) setDefault(kind core.Kind, version string) {
+	var err error
+	if version == "" {
+		err = a.svc.ClearDefault(kind)
+	} else {
+		err = a.svc.SetDefault(kind, version)
+	}
+	if err != nil {
+		a.pushToast(err.Error())
+		return
+	}
+	if version == "" {
+		a.pushToast("已取消 " + core.Info(kind).Name + " 的默认版本")
+	} else {
+		a.pushToast(core.Info(kind).Name + " 默认使用 " + version + "，已开的终端下次 cd 生效")
+	}
+	a.syncAndRecompute()
+}
+
 // defaultDataDirHint is the placeholder of the data directory field.
 func defaultDataDirHint() string {
 	if dir, err := core.ConfigDir(); err == nil {
