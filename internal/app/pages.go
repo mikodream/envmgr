@@ -111,6 +111,16 @@ func (a *App) checkupStrip(c *ui.Context) {
 				ui.Text(c, "运行环境、存储、终端钩子、工具链、项目、设置逐项检查").
 					FontSize(10.5).TextColor(t.TextMuted).SingleLine()
 			})
+			if outdated, ended := a.updateCount(); outdated > 0 || ended > 0 {
+				text := fmt.Sprintf("%d 个版本可更新", outdated)
+				if outdated == 0 {
+					text = fmt.Sprintf("%d 个系列已停止维护", ended)
+				}
+				if ui.Button(c, text).Label("查看可更新或已停止维护的版本").Clicked() {
+					a.SetPage(PageToolchains)
+					a.toolchainView = 0
+				}
+			}
 			if ui.Button(c, "查看详情").Label("查看详情").Clicked() {
 				a.SetPage(PageDoctor)
 			}
@@ -614,10 +624,16 @@ func (a *App) kindCard(c *ui.Context, p core.Project, kind core.Kind, r core.Res
 // ---- 工具链 ----
 
 func (a *App) toolchainsPage(c *ui.Context) {
+	t := c.Theme()
 	ui.Column(c).Fill().Padding(20, 20, 24, 20).Gap(14).Children(func() {
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Segmented(c, &a.toolchainView, "已装 SDK", "版本管理器").Label("工具链视图")
 			ui.Spacer(c)
+			if a.updatesBusy {
+				ui.Text(c, "正在检查更新…").FontSize(11).TextColor(t.TextMuted)
+			} else if ui.Button(c, "检查更新").Label("检查已装版本有没有新版本、是否已停止维护").Clicked() {
+				a.loadUpdates(true)
+			}
 		})
 		if a.toolchainView == 1 {
 			a.toolchainManagers(c)
@@ -709,6 +725,16 @@ func (a *App) installedRow(c *ui.Context, inst core.Installed) {
 			ui.Text(c, core.Info(inst.Kind).Name).FontSize(10).TextColor(t.TextMuted).SingleLine()
 		})
 		a.chip(c, managerLabel(inst.Manager), t.TextMuted, t.SurfaceHover)
+		a.updatesBadge(c, inst)
+		if u, ok := a.updateFor(inst); ok && u.Outdated() && u.Latest != "" {
+			if inst.Manager == "envmgr" && inst.Kind != core.Rust {
+				if ui.Button(c, "升级到 "+u.Latest).Label("升级 " + inst.ID() + " 到 " + u.Latest).Clicked() {
+					a.startUpgrade(u)
+				}
+			} else {
+				a.chip(c, "可更新 "+u.Latest, t.Accent, t.Accent.Alpha(0.12))
+			}
+		}
 		ui.Text(c, inst.Path).FontSize(10.5).Font("monospace").TextColor(t.TextMuted).
 			Grow(1).MinWidth(0).SingleLine().Ellipsis("…")
 		if a.iconButton(c, icCopy, "复制路径", false).Clicked() {

@@ -23,6 +23,8 @@ var commands = []struct {
 	{"use", "在项目里固定版本，写入 .envmgr.json"},
 	{"default", "设置项目没写版本时使用的全局默认版本"},
 	{"list", "列出已安装的版本，或可下载的版本"},
+	{"outdated", "对比已装版本与各自系列的最新版、维护状态"},
+	{"upgrade", "把 EnvMgr 装的版本升级到同系列最新"},
 	{"install", "从官方源下载并安装一个版本"},
 	{"remove", "删除 EnvMgr 安装的版本"},
 	{"doctor", "检查项目要的版本是否都在本机"},
@@ -42,6 +44,10 @@ func HasCommand(name string) bool {
 		if c.Name == name {
 			return true
 		}
+	}
+	switch name {
+	case "ls", "rm", "uninstall", "i", "status", "updates", "update", "import":
+		return true
 	}
 	return false
 }
@@ -69,6 +75,8 @@ func PrintUsage(w io.Writer) {
   envmgr default                  看当前的全局默认版本
   envmgr default --unset node     取消 Node 的默认版本
   envmgr list --remote node       看看能装哪些 Node 版本
+  envmgr outdated                 看哪些版本落后了、哪些系列已停止维护
+  envmgr upgrade --pin            升到同系列最新，并改写项目里的确切版本
   envmgr install python@3.12.4    安装 Python 3.12.4
   envmgr git                      看当前目录的仓库状态与提交身份
   envmgr git init                 把当前目录变成 Git 仓库
@@ -125,6 +133,10 @@ func Run(args []string) int {
 		return cmdDefault(svc, args[1:])
 	case "list", "ls":
 		return cmdList(svc, args[1:])
+	case "outdated", "updates":
+		return cmdOutdated(svc, args[1:])
+	case "upgrade", "update":
+		return cmdUpgrade(svc, args[1:])
 	case "install", "i":
 		return cmdInstall(svc, args[1:])
 	case "remove", "rm", "uninstall":

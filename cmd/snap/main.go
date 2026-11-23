@@ -85,6 +85,18 @@ func main() {
 		}
 	}
 
+	// Release status comes from the network, and a render takes one frame, so
+	// live mode waits for the real answer instead of drawing without badges.
+	if *live {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		list, err := svc.Updates(ctx, false)
+		cancel()
+		if err != nil {
+			log.Printf("updates: %v", err)
+		}
+		a.SetUpdates(list)
+	}
+
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
 	}

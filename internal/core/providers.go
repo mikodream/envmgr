@@ -607,21 +607,29 @@ func (rustInstaller) List(ctx context.Context, cfg Config) ([]Remote, error) {
 	return out, nil
 }
 
-// rustChannelVersion reads the version a channel currently points at.
+// rustChannelVersion reads the version a channel currently points at. The
+// manifest lists cargo first, so the version has to be read from the rust
+// package's own section rather than from the first line that matches.
 func rustChannelVersion(ctx context.Context, channel string) (string, error) {
 	body, err := FetchBytes(ctx, "https://static.rust-lang.org/dist/channel-rust-"+channel+".toml")
 	if err != nil {
 		return "", err
 	}
+	section := ""
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "version = ") {
-			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version = ")), `"`)
-			if i := strings.IndexByte(v, ' '); i > 0 {
-				v = v[:i]
-			}
-			return v, nil
+		if strings.HasPrefix(line, "[") {
+			section = line
+			continue
 		}
+		if section != "[pkg.rust]" || !strings.HasPrefix(line, "version = ") {
+			continue
+		}
+		v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "version = ")), `"`)
+		if i := strings.IndexByte(v, ' '); i > 0 {
+			v = v[:i]
+		}
+		return v, nil
 	}
 	return "", nil
 }

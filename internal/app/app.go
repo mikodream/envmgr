@@ -87,6 +87,15 @@ type App struct {
 	syncedAt string
 	syncing  bool
 
+	// Release status of the installed versions: whether a newer release of
+	// the same line exists, and whether the line is still maintained. Keyed
+	// by kind@version, filled by a background check.
+	updates     map[string]core.Update
+	updatesBusy bool
+	updatesDone bool
+	updatesAt   string
+	updatesErr  string
+
 	// Projects page.
 	projectQuery string
 	selProject   int
@@ -213,7 +222,8 @@ type App struct {
 // New builds the app state around a service.
 func New(svc *core.Service) *App {
 	a := &App{svc: svc, selProject: -1, showEnvFor: -1,
-		remoteCache: map[core.Kind][]core.Remote{}}
+		remoteCache: map[core.Kind][]core.Remote{},
+		updates:     map[string]core.Update{}}
 	cfg := svc.Config()
 	a.dataDir = cfg.DataDir
 	a.nodeMirror = cfg.NodeMirror
@@ -231,6 +241,9 @@ func (a *App) SetWindow(win *mygo.Window) {
 	// Capture the window once: background callbacks never read mutable UI state.
 	a.watchService(win.Update, win.Invalidate)
 	a.serviceSync.request()
+	// Release status needs the network, so it loads in the background and
+	// the first frames simply draw without badges.
+	a.loadUpdates(false)
 }
 
 // SetPage switches the visible page, for the command line's --page flag and
@@ -325,6 +338,18 @@ func (a *App) SetRemote(kind core.Kind, list []core.Remote) {
 	a.remoteLoading = false
 	a.remoteErr = ""
 	a.cacheRemote(kind, list)
+}
+
+// SetUpdates seeds release status, for the snapshot tool and tests. The
+// window fills the same field from a background check.
+func (a *App) SetUpdates(list []core.Update) {
+	next := make(map[string]core.Update, len(list))
+	for _, u := range list {
+		next[updateKey(u.Kind, u.Version)] = u
+	}
+	a.updates = next
+	a.updatesDone = true
+	a.updatesAt = nowLabel()
 }
 
 // SetToolchainKind selects the SDK tab, for the snapshot tool.

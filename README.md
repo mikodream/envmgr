@@ -219,6 +219,8 @@ envmgr default                           # 看当前的全局默认版本
 envmgr default --unset node              # 取消 Node 的默认版本
 envmgr list                              # 本机已装
 envmgr list --remote node                # 官方源可装的版本
+envmgr outdated                          # 已装版本 vs 同系列最新、维护截止日期
+envmgr upgrade --pin                     # 升到同系列最新，并改写项目里确切版本
 envmgr install python@3.12.4             # 下载并安装
 envmgr remove node@20.11.1               # 删除 EnvMgr 装的版本
 envmgr remove node@20.11.1 --force       # 项目仍在用这个版本时也删除
@@ -237,6 +239,30 @@ envmgr forget-version java ~/env/java/17 # 取消登记（不删磁盘文件）
 
 `envmgr env` 在部分版本缺失时仍导出已经解析的 SDK，并把缺失项写到 stderr（退出码 0），这样钩子不会因为一个版本没装而丢掉整个环境；`envmgr run` 保持严格，缺任何一个版本都不启动。`envmgr remove` 默认拒绝删除仍被项目使用、或仍是全局默认的版本，确认后再加 `--force`。
 
+## 更新与维护状态
+
+每个已装版本都被放回**它自己所属的发布线**里比较：Node 与 Java 按大版本（20、21），Python 与 Go 按 `3.12`、`1.27` 这样的次版本线，Rust 按 1.x。所以 20.11.1 不会被提示"该升到 22"，同一条线里的补丁与小版本才会被算作更新。
+
+```bash
+envmgr outdated                # 每个已装版本 vs 同系列最新、维护截止日期
+envmgr outdated --json         # 给脚本用
+envmgr outdated --refresh      # 跳过缓存重新问一遍
+envmgr upgrade                 # 升级 EnvMgr 安装的、同系列内有更新的版本
+envmgr upgrade node@20         # 只升级匹配的那一个
+envmgr upgrade node@20 --pin   # 顺带把项目里写死的确切版本改掉
+envmgr upgrade --dry-run       # 只看计划，不动磁盘
+```
+
+维护状态来自 [endoflife.date](https://endoflife.date) 的发布日程，按 24 小时缓存。拿不到日程时只是少一列"维护"，不会拦住更新检查；某个下载源暂时不可达也只影响那一个 SDK，其余照常给出结论。
+
+窗口里同样能看到：概览的体检条会写"N 个版本可更新"，工具链页每个版本行给出"升级到 x.y.z"按钮，已停止维护的系列带一枚红色标记，即将到期的显示"还有 N 天"。
+
+升级有三条边界：
+
+- **只升同一条线**。跨大版本（Node 20 → 22）只提示"新系列"，绝不自动做。
+- **只升 EnvMgr 自己装的版本**。nvm、pyenv、fnm 的版本由各自的工具管，EnvMgr 只给结论；Rust 工具链交给 `rustup update`。
+- **旧版本不删**。别的项目可能还固定着它，升级后命令会列出"仍有 N 个项目固定着旧版本"。`--pin` 只改写 `.envmgr.json` 里写死的确切版本；`.nvmrc` 这类别的工具拥有的文件只提示、不代写。
+
 ## 项目一键就绪与安装任务
 
 项目详情的「一键就绪」会先解析项目声明，并检查全部缺失 SDK 是否有匹配的可下载版本；检查通过后依次安装，最后执行每个 SDK 的版本命令，核对实际版本。已安装的 SDK 直接验证；Ruby 等需要手动导入的 SDK 会给出明确说明。Java 自动安装优先使用默认来源 Temurin。
@@ -248,6 +274,8 @@ envmgr forget-version java ~/env/java/17 # 取消登记（不删磁盘文件）
 ## 工具链与版本管理器
 
 工具链页顶部有「已装 SDK」和「版本管理器」两个独立入口。前者按 Node.js、Python、Java 等语言查看已装版本及来源；后者集中查看 nvm、fnm、pyenv、mise 等管理工具，保留安装、状态、目录和官网入口，多语言管理器统一显示一次。两份列表分别保存滚动位置，SDK 列表为空时可通过「查看版本管理器」跳转。
+
+「已装 SDK」的每一行还会显示发布状态：有新版本时给出「升级到 x.y.z」按钮（仅 EnvMgr 自己装的版本），系列已停止维护时带红色标记，三个月内到期时显示剩余天数。顶部「检查更新」会重新问一次下载源与发布日程。
 
 <img src="shots/toolchains-managers.png" alt="独立的版本管理器视图">
 
@@ -353,6 +381,7 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 | --- | --- |
 | 配置与项目列表 | `~/.envmgr/state.json`（跨进程锁、原子写入；损坏时保留原文件并报错） |
 | 最近一次发现结果 | `~/.envmgr/discovery.json`（60 秒内有效；`env` 走缓存，缺失或过期时重扫） |
+| 发布日程缓存 | `~/.envmgr/lifecycle.json`（24 小时有效；只存各系列的维护截止日期） |
 | EnvMgr 装的 SDK | `~/.envmgr/sdk/<kind>/<version>` |
 | 版本管理器 | `~/.envmgr/managers/<id>` |
 | 下载缓存 | `~/.envmgr/downloads` |
@@ -383,6 +412,7 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 - 绘制路径不执行环境探测：设置页的 Git 能力、自动套用状态和 shell 钩子状态由后台快照提供；工具链排序和体检排序在快照更新时完成，下载源分组在数据到达时计算。工具链、下载和体检使用虚拟列表，仅构建可见行；设置页进入时异步更新检测结果，安装或移除钩子后也会更新快照。
 - `go test ./internal/core/` —— 版本比较与匹配、标记文件解析、PATH 覆盖与去重、zip-slip 防护、解包展平、项目内 pin 优先于标记文件、`LookPath` 优先使用覆盖后的 PATH。
 - 目录继承、部分生效与删除保护：`go test ./internal/core -run 'NearestProject|EnvForSubdirectory|FastService|RemoveRefuses' -count=1` 在临时 HOME 里验证向上查找、子目录自有声明优先、缺失版本不拖垮已解析的 SDK、快照复用与过期重扫，以及删除仍被项目使用的版本会被拒绝、只有 `RemoveForced` 才真正删掉；`go test ./internal/cli -run 'ResolvedSDKs' -count=1` 从命令行再验证一次根目录与子目录导出同一份环境。
+- 更新与维护状态：`go test ./internal/core -run 'LineOf|CycleFor|EOLState|BuildUpdates|ParseLifecycle|LineTarget|RepinExact' -count=1` 覆盖发布线的划分（Node/Java 按大版本、Python/Go 按次版本、Rust 按 1.x）、日程记录的最长前缀匹配、`eol: false` 表示仍在维护、预发布版不会成为升级目标、同系列之外不推荐升级，以及 `--pin` 只改写确切版本、不碰 `20` 这类前缀。`go test ./internal/cli -run 'Pad|Labels|UpgradeTargets' -count=1` 守住中文列宽对齐与无参数时的目标筛选。
 - `go test ./internal/core/` 里还有一组**真 git** 测试：临时仓库里跑 `git init`、写项目级 `user.name`/`user.email`、读回来、清空再确认回退到全局；用 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` 指向临时文件，绝不读写本机真实的 `~/.gitconfig`。
 - 控件几何回归：`go test ./internal/app -run 'SelectChevron|IconButtonGlyph|PinPickerKeeps' -count=1` 把渲染出的位图按触发条区域取墨迹包围盒，断言下拉箭头垂直居中于触发条（误差 ≤1.5 DIP）、右端距边缘 10–14 DIP、尺寸不超过 16×16，以及只有图标的按钮（打开目录、打开官网、复制路径、删除）里图标居中于 28×28 按钮（误差 ≤1 DIP）。换回旧的 `⌄` 字形箭头会让箭头中心比触发条低 4.9 DIP，换回带文字内边距的图标按钮会得到 30×28 而不是正方形，两种情况测试都会失败。
 - `go vet ./...`、`gofmt -l` 干净。
