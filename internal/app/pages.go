@@ -645,6 +645,9 @@ func (a *App) toolchainsPage(c *ui.Context) {
 
 func (a *App) toolchainVersions(c *ui.Context) {
 	t := c.Theme()
+	// Version rows show their footprint once measured; drawing the page is
+	// what starts the background walk.
+	a.loadDisk()
 	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 		if ui.Segmented(c, &a.toolchainKind, kindNames()...).Label("SDK 类型").Changed() {
 			a.installedList = ui.ListState{}
@@ -725,6 +728,7 @@ func (a *App) installedRow(c *ui.Context, inst core.Installed) {
 			ui.Text(c, core.Info(inst.Kind).Name).FontSize(10).TextColor(t.TextMuted).SingleLine()
 		})
 		a.chip(c, managerLabel(inst.Manager), t.TextMuted, t.SurfaceHover)
+		a.sizeChip(c, inst)
 		a.updatesBadge(c, inst)
 		if u, ok := a.updateFor(inst); ok && u.Outdated() && u.Latest != "" {
 			if inst.Manager == "envmgr" && inst.Kind != core.Rust {
@@ -1490,6 +1494,9 @@ func (a *App) settingsPage(c *ui.Context) {
 				}
 			})
 		})
+
+		// Footprint: what the SDKs cost, and what is safe to reclaim.
+		a.diskCard(c)
 
 		// Network: where downloads come from and how they get there.
 		a.networkCard(c)

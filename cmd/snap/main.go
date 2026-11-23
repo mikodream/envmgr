@@ -149,6 +149,17 @@ func main() {
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
+		// The disk card starts empty and fills from a background walk. Same
+		// rule as the download list: wait for the numbers to land.
+		if *live && (p.page == app.PageSettings || p.page == app.PageToolchains) {
+			ui.Render(a.View, *w, *h, float32(*scale))
+			for i := 0; i < 300; i++ {
+				if a.DiskReady() {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
 		// The chooser needs the list, so it opens after the wait above.
 		if p.page == app.PageDownloads && *vendorDlg {
 			if !a.OpenVendorPicker(*vendorVersion) {

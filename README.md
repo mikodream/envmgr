@@ -226,6 +226,8 @@ envmgr net                               # 看当前的代理与各 SDK 的下�
 envmgr net python cn                     # Python 改用南京大学镜像
 envmgr net node cn                       # Node 改用 npmmirror
 envmgr net proxy http://127.0.0.1:7890   # 所有下载走本地代理
+envmgr disk                              # 每个版本占多少空间、缓存和残留有多大
+envmgr disk --clean                      # 清掉下载归档与残留目录（不动已装版本）
 envmgr remove node@20.11.1               # 删除 EnvMgr 装的版本
 envmgr remove node@20.11.1 --force       # 项目仍在用这个版本时也删除
 envmgr doctor                            # 每个项目要的版本是否都在本机
@@ -280,6 +282,17 @@ envmgr upgrade --dry-run       # 只看计划，不动磁盘
 工具链页顶部有「已装 SDK」和「版本管理器」两个独立入口。前者按 Node.js、Python、Java 等语言查看已装版本及来源；后者集中查看 nvm、fnm、pyenv、mise 等管理工具，保留安装、状态、目录和官网入口，多语言管理器统一显示一次。两份列表分别保存滚动位置，SDK 列表为空时可通过「查看版本管理器」跳转。
 
 「已装 SDK」的每一行还会显示发布状态：有新版本时给出「升级到 x.y.z」按钮（仅 EnvMgr 自己装的版本），系列已停止维护时带红色标记，三个月内到期时显示剩余天数。顶部「检查更新」会重新问一次下载源与发布日程。
+
+## 磁盘占用与清理
+
+SDK 装多了到底占了多少？`envmgr disk` 给出完整的账：
+
+- **每个版本一行**：版本、来源管理器、实际占用（按目录逐个计算）；
+- **下载缓存**：安装包解包后保留在 `~/.envmgr/downloads`，重装同版本不用再下载，需要时一键清掉；
+- **残留**：中断安装留下的 `.install-*` 临时目录、扫描不到有效 SDK 的目录，明确列出并可回收；
+- `envmgr disk --json` 输出机器可读的报告，方便写进脚本。
+
+清理的安全边界：**已安装的版本一个都不会动**（删除走 `remove`，它知道哪些项目还在用）；刚写入不到 10 分钟的文件视为可能有安装正在进行，自动跳过；下载与解包的文件锁被占用时也不碰。统计结果按目录修改时间缓存在 `~/.envmgr/sizes.json`，SDK 目录装好后不会变，所以第二次统计通常在 100ms 内。系统共享目录（`/usr` 之类）不把整个目录算给某个 SDK，cargo 主目录会注明"含依赖缓存"。
 
 <img src="shots/toolchains-managers.png" alt="独立的版本管理器视图">
 
@@ -386,6 +399,7 @@ GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o d
 | 配置与项目列表 | `~/.envmgr/state.json`（跨进程锁、原子写入；损坏时保留原文件并报错） |
 | 最近一次发现结果 | `~/.envmgr/discovery.json`（60 秒内有效；`env` 走缓存，缺失或过期时重扫） |
 | 发布日程缓存 | `~/.envmgr/lifecycle.json`（24 小时有效；只存各系列的维护截止日期） |
+| 各安装的占用统计 | `~/.envmgr/sizes.json`（按目录修改时间缓存，目录没变就不再重算） |
 | EnvMgr 装的 SDK | `~/.envmgr/sdk/<kind>/<version>` |
 | 版本管理器 | `~/.envmgr/managers/<id>` |
 | 下载缓存 | `~/.envmgr/downloads` |

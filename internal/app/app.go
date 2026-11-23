@@ -96,6 +96,15 @@ type App struct {
 	updatesAt   string
 	updatesErr  string
 
+	// Disk footprint of every installed version, measured in the background.
+	// diskSizes is keyed by kind@version so a version row can show its own
+	// number without walking the tree while drawing.
+	disk      core.DiskReport
+	diskSizes map[string]int64
+	diskBusy  bool
+	diskReady bool
+	diskErr   string
+
 	// Projects page.
 	projectQuery string
 	selProject   int
@@ -228,7 +237,8 @@ type App struct {
 func New(svc *core.Service) *App {
 	a := &App{svc: svc, selProject: -1, showEnvFor: -1,
 		remoteCache: map[core.Kind][]core.Remote{},
-		updates:     map[string]core.Update{}}
+		updates:     map[string]core.Update{},
+		diskSizes:   map[string]int64{}}
 	cfg := svc.Config()
 	a.dataDir = cfg.DataDir
 	a.themeMode = cfg.Theme
@@ -249,6 +259,9 @@ func (a *App) SetWindow(win *mygo.Window) {
 	// Release status needs the network, so it loads in the background and
 	// the first frames simply draw without badges.
 	a.loadUpdates(false)
+	// Footprint numbers are a full directory walk on the first run, so they
+	// also arrive after the first frames.
+	a.loadDisk()
 }
 
 // SetPage switches the visible page, for the command line's --page flag and
