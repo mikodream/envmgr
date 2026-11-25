@@ -138,6 +138,14 @@ func readyProject(ctx context.Context, p Project, progress ReadyProgress, ops re
 	return result, nil
 }
 
+// MatchRemote picks the remote that satisfies a version expression ("20",
+// ">=3.12", "lts"), preferring the newest match and the default vendor when a
+// version has several builds. It is the planning half of an install, exposed
+// so a dry run can name the exact version it would download.
+func MatchRemote(list []Remote, kind Kind, expr string) (Remote, error) {
+	return matchingRemote(list, kind, expr)
+}
+
 func matchingRemote(list []Remote, kind Kind, expr string) (Remote, error) {
 	var candidates []Remote
 	for _, r := range list {

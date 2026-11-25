@@ -28,6 +28,7 @@ var commands = []struct {
 	{"install", "从官方源下载并安装一个版本"},
 	{"remove", "删除 EnvMgr 安装的版本"},
 	{"doctor", "检查项目要的版本是否都在本机"},
+	{"ready", "安装项目缺失的版本并逐个验证可用"},
 	{"hook", "打印可选安装的 shell 钩子"},
 	{"net", "查看或修改下载源与代理"},
 	{"disk", "查看磁盘占用，清理下载缓存与残留"},
@@ -88,6 +89,8 @@ func PrintUsage(w io.Writer) {
   envmgr disk                     看每个版本占多少空间、缓存和残留有多大
   envmgr disk --clean             清掉下载缓存与残留目录（不动已装版本）
   envmgr outdated                 看哪些版本落后了、哪些系列已停止维护
+  envmgr ready --dry-run          预览项目缺哪些版本、会装哪个具体版本
+  envmgr ready                    装齐项目缺失的版本并逐个验证可用
   envmgr upgrade --pin            升到同系列最新，并改写项目里的确切版本
   envmgr install python@3.12.4    安装 Python 3.12.4
   envmgr git                      看当前目录的仓库状态与提交身份
@@ -155,6 +158,8 @@ func Run(args []string) int {
 		return cmdRemove(svc, args[1:])
 	case "doctor", "status":
 		return cmdDoctor(svc, args[1:])
+	case "ready":
+		return cmdReady(svc, args[1:])
 	case "hook":
 		return cmdHook(svc, args[1:])
 	case "net":
